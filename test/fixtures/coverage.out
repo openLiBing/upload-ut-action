@@ -1,0 +1,5 @@
+mode: count
+openlibing/pkg/a.go:5.3,7.2 2 1
+openlibing/pkg/a.go:10.2,11.8 1 1
+openlibing/pkg/b.go:3.2,4.8 1 0
+openlibing/pkg/b.go:8.2,9.6 1 1

@@ -1,0 +1,11 @@
+        -:    0:Source:foo.c
+        -:    0:Graph:foo.gcno
+        -:    0:Data:foo.gcda
+        -:    0:Runs:1
+        -:    1:/* comment */
+        5:    2:int foo(int x) {
+        5:    3:    if (x > 0) {
+        3:    4:        return 1;
+        #####:    5:    }
+        2:    6:    return 0;
+        -:    7:}

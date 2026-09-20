@@ -1,0 +1,39 @@
+{
+  "meta": {
+    "format": 2,
+    "version": "7.4.0",
+    "timestamp": "2026-09-19T10:00:00"
+  },
+  "files": {
+    "src/a.py": {
+      "executed_lines": [1, 2, 3],
+      "summary": {
+        "covered_lines": 3,
+        "num_statements": 4,
+        "percent_covered": 75.0,
+        "percent_covered_display": "75",
+        "missing_branches": 1,
+        "branches": 2
+      }
+    },
+    "src/b.py": {
+      "executed_lines": [1],
+      "summary": {
+        "covered_lines": 1,
+        "num_statements": 2,
+        "percent_covered": 50.0,
+        "percent_covered_display": "50",
+        "missing_branches": 0,
+        "branches": 1
+      }
+    }
+  },
+  "totals": {
+    "covered_lines": 4,
+    "num_statements": 6,
+    "percent_covered": 66.66666666666666,
+    "percent_covered_display": "67",
+    "missing_branches": 1,
+    "branches": 3
+  }
+}
