@@ -20,7 +20,8 @@ test('CoverageNormalizer 单报告组装标准 JSON', () => {
   assert.strictEqual(out.pipelineRunId, '123');
   assert.strictEqual(out.commitId, 'abc');
   assert.strictEqual(out.lineCoverage, 80);
-  assert.strictEqual(out.branchCoverage, 66.67);
+  // 仅行覆盖率指标：可选指标不再输出
+  assert.strictEqual(out.branchCoverage, undefined);
   assert.strictEqual(out.methodCoverage, undefined);
   assert.strictEqual(out.classCoverage, undefined);
   // 无行数据文件被剔除
@@ -40,9 +41,9 @@ test('CoverageNormalizer 多报告合并：总体重新求和 + 文件明细拼�
     files: [{ filePath: 'src/app.js', lineCoverage: 75, lineCovered: 3, lineTotal: 4, methodCoverage: 100, methodCovered: 1, methodTotal: 1 }],
   };
   const out = CoverageNormalizer.normalize([jacoco, c8], { gitUrl: '', branchName: '', pipelineRunId: '', commitId: '' }, '');
-  // 总体：行 (4+3)/(5+4) = 77.78%；方法 1/1 = 100%
+  // 总体行覆盖率：(4+3)/(5+4) = 77.78%；可选指标不再输出
   assert.strictEqual(out.lineCoverage, 77.78);
-  assert.strictEqual(out.methodCoverage, 100);
+  assert.strictEqual(out.methodCoverage, undefined);
   assert.strictEqual(out.fileDetails.length, 2);
 });
 

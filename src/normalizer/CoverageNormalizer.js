@@ -10,9 +10,7 @@ const { pct } = require('../util/coverageUtil');
  *    - 文件明细直接拼接；
  *    - 总体指标按 covered/total 重新求和（等价于报告级 totals 聚合）。
  * 2. 文件路径归一化：剥离仓库根前缀、file:// 前缀、前导 ./ 与 /，统一为仓库相对路径。
- * 3. 组装标准上报 JSON：
- *    lineCoverage 必填；branchCoverage/methodCoverage/classCoverage 仅在数据存在时输出；
- *    每个 fileDetails 条目同样只输出存在的指标。
+ * 3. 组装标准上报 JSON：仅保留行覆盖率 lineCoverage（唯一必填指标）。
  */
 
 /** 文件路径归一化：机器绝对路径 / file:// / ./ 前缀 → 仓库相对路径 */
@@ -27,7 +25,7 @@ function normalizeFilePath(p, repoRoot) {
   return fp;
 }
 
-/** 过滤并归一化文件明细数组：剔除无行数据的条目，路径归一化，仅保留存在的指标 */
+/** 过滤并归一化文件明细数组：剔除无行数据的条目，路径归一化，仅保留行覆盖率指标 */
 function buildFileDetails(files, repoRoot) {
   const out = [];
   const seen = new Map(); // 同路径去重（多报告合并时同文件只保留首个）
@@ -38,18 +36,12 @@ function buildFileDetails(files, repoRoot) {
     if (!filePath) continue;
     if (seen.has(filePath)) continue;
     seen.set(filePath, true);
-    const item = { filePath };
-    item.lineCoverage = Number(f.lineCoverage);
-    item.lineCovered = Number(f.lineCovered || 0);
-    item.lineTotal = lineTotal;
-    for (const type of ['branch', 'method', 'class']) {
-      if (f[`${type}Total`] != null && Number(f[`${type}Total`]) > 0) {
-        item[`${type}Coverage`] = Number(f[`${type}Coverage`]);
-        item[`${type}Covered`] = Number(f[`${type}Covered`] || 0);
-        item[`${type}Total`] = Number(f[`${type}Total`]);
-      }
-    }
-    out.push(item);
+    out.push({
+      filePath,
+      lineCoverage: Number(f.lineCoverage),
+      lineCovered: Number(f.lineCovered || 0),
+      lineTotal,
+    });
   }
   return out;
 }
@@ -62,7 +54,7 @@ function buildFileDetails(files, repoRoot) {
  * @returns {Object} 标准上报 JSON
  */
 function normalize(parsedList, meta, repoRoot) {
-  const agg = { line: { covered: 0, total: 0 }, branch: { covered: 0, total: 0 }, method: { covered: 0, total: 0 }, class: { covered: 0, total: 0 } };
+  const agg = { line: { covered: 0, total: 0 } };
   const allFiles = [];
 
   for (const parsed of parsedList || []) {
@@ -71,12 +63,6 @@ function normalize(parsedList, meta, repoRoot) {
     if (m.lineTotal != null) {
       agg.line.covered += Number(m.lineCovered || 0);
       agg.line.total += Number(m.lineTotal);
-    }
-    for (const type of ['branch', 'method', 'class']) {
-      if (m[`${type}Total`] != null) {
-        agg[type].covered += Number(m[`${type}Covered`] || 0);
-        agg[type].total += Number(m[`${type}Total`]);
-      }
     }
     if (Array.isArray(parsed.files)) {
       allFiles.push(...parsed.files);
@@ -94,11 +80,6 @@ function normalize(parsedList, meta, repoRoot) {
     commitId: meta.commitId || '',
     lineCoverage: pct(agg.line.covered, agg.line.total),
   };
-  for (const type of ['branch', 'method', 'class']) {
-    if (agg[type].total > 0) {
-      out[`${type}Coverage`] = pct(agg[type].covered, agg[type].total);
-    }
-  }
 
   const fileDetails = buildFileDetails(allFiles, repoRoot);
   out.fileDetails = fileDetails;
