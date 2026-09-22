@@ -98,9 +98,11 @@ npm run build      # ncc 打包到 dist/，并生成 upload-ut-action.zip
 
 ## 版本发布
 
-- 插件版本以 `action.yml` 的 `version` 为准，`npm run build` 会自动递增 patch 版本
-- Tag 格式：`v` + 版本号，如 `v1.0.2`，工作流通过 `uses: openlibing/upload-ut-action@v1.0.2` 引用，依赖该 tag 存在
-- 发布时需填写 Release 明细（变更内容、输入输出变化、兼容性说明），不允许空明细发布
+发布新版本时必须遵守：
+
+- **版本号**：递增语义化版本，`action.yml` 与 `package.json` 保持一致
+- **Tag 格式**：`v` + 版本号，如 `v1.0.2`。工作流通过 `uses: openlibing/upload-ut-action@v1.0.2` 引用，依赖该 tag 存在
+- **发布明细**：创建 Release 时必须填写发布明细（变更内容、新增/修改的输入输出、兼容性说明等），不允许空明细发布
 
 ## 项目结构
 
