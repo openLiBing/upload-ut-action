@@ -2,6 +2,9 @@ name: pre-commit
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
   pull_request_target: # 使用 pull_request_target 确保 PR 流水线始终读取默认分支（master）的最新配置文件
     branches:
       - "*"
@@ -21,10 +24,11 @@ stages:
     jobs:
       pr-label-running:
         name: pr-label-running
-        runs-on: ["ubuntu-latest", "x64", "small"]
+        if: ${{ contains('pull_request_target,pull_request_comment,MR,Note', atomgit.event_name) }}
+        runs-on: ["self-hosted", "region=cn"]
         steps:
           - name: pr-label-running
-            uses: ozvale/pr-label-action@main
+            uses: openlibing/pr-label-action@v1.0.0
             with:
               token: ${{ secrets.ROBOT_TOKEN }}
               add_labels: ci-pipeline-running
@@ -63,10 +67,11 @@ post:
   jobs:
     label-pr:
       name: pr-label-complete
-      runs-on: ["ubuntu-latest", "x64", "slim"]
+      if: ${{ contains('pull_request_target,pull_request_comment,MR,Note', atomgit.event_name) }}
+      runs-on: ["self-hosted", "region=cn"]
       steps:
         - name: set pr label complete
-          uses: ozvale/pr-label-action@main
+          uses: openlibing/pr-label-action@v1.0.0
           with:
             token: ${{ secrets.ROBOT_TOKEN }}
             add_labels: ${{ pipeline.upstream_status == 'COMPLETED' && 'ci-pipeline-passed' || 'ci-pipeline-failed' }}
