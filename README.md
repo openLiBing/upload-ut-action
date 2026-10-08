@@ -10,17 +10,17 @@
 
 ## 输入参数
 
-| 参数         | 必填 | 默认值           | 说明                                            |
-| ------------ | ---- | ---------------- | ----------------------------------------------- |
-| `report_dir` | 是   | -                | 覆盖率报告路径，文件或目录，逗号分隔可传多个    |
-| `env_type`   | 否   | `prod`           | 环境类型：`prod`（正式）/ `beta`（测试）        |
-| `region`     | 否   | `cn-southwest-2` | 华为云区域                                      |
+| 参数         | 必填 | 默认值           | 说明                                         |
+| ------------ | ---- | ---------------- | -------------------------------------------- |
+| `report_dir` | 是   | -                | 覆盖率报告路径，文件或目录，逗号分隔可传多个 |
+| `env_type`   | 否   | `prod`           | 环境类型：`prod`（正式）/ `beta`（测试）     |
+| `region`     | 否   | `cn-southwest-2` | 华为云区域                                   |
 
 ## 输出
 
-| 输出     | 说明                              |
-| -------- | --------------------------------- |
-| `result` | 上报结果：`success` / `failed`    |
+| 输出     | 说明                           |
+| -------- | ------------------------------ |
+| `result` | 上报结果：`success` / `failed` |
 
 ## 前置条件
 
@@ -69,14 +69,14 @@ jobs:
 
 ### 支持的报告格式
 
-| 工具               | 报告文件                                                         |
-| ------------------ | ---------------------------------------------------------------- |
-| Java JaCoCo        | `jacoco.xml`                                                     |
-| Python coverage.py | `coverage.json`                                                  |
-| Go test            | `coverage.out`（`go test -coverprofile` 产物）                   |
-| C/C++ gcov / llvm-cov | `*.gcov`、`*.lcov` / `*.info`                                 |
-| JS c8              | `coverage-final.json`                                            |
-| Rust cargo-llvm-cov | lcov（`--lcov`）或 llvm-cov export JSON（`--json`）              |
+| 工具                  | 报告文件                                            |
+| --------------------- | --------------------------------------------------- |
+| Java JaCoCo           | `jacoco.xml`                                        |
+| Python coverage.py    | `coverage.json`                                     |
+| Go test               | `coverage.out`（`go test -coverprofile` 产物）      |
+| C/C++ gcov / llvm-cov | `*.gcov`、`*.lcov` / `*.info`                       |
+| JS c8                 | `coverage-final.json`                               |
+| Rust cargo-llvm-cov   | lcov（`--lcov`）或 llvm-cov export JSON（`--json`） |
 
 `coverage.json` 等歧义文件会自动按内容识别归属工具，无需手动区分。
 

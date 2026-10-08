@@ -10,7 +10,11 @@
             "functions": { "count": 5, "covered": 4, "percent": 80.0 },
             "branches": { "count": 10, "covered": 6, "percent": 60.0 },
             "regions": { "count": 50, "covered": 40, "percent": 80.0 },
-            "instantiations": { "count": 3, "covered": 2, "percent": 66.66666666666666 }
+            "instantiations": {
+              "count": 3,
+              "covered": 2,
+              "percent": 66.66666666666666
+            }
           }
         },
         {
