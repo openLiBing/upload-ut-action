@@ -65,7 +65,7 @@ stages:
               echo 'prettier version:' && npx prettier --version
 
           - name: pre-commit
-            uses: openlibing/pre-commit-action@v1.0.40
+            uses: openlibing/pre-commit-action@v1.0.2
             with:
               extra_args: ${{ inputs.extra_args }}
 
