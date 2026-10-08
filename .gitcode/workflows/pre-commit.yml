@@ -46,6 +46,12 @@ stages:
             with:
               ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.event.pull_request.head.sha }} # 使用预合并后的 commit SHA 进行检出，确保 CI 检查的是 PR 与目标分支合并后的最终代码状态
 
+          - name: setup-python
+            uses: setup-python
+            with:
+              python-version: "3.14"
+              cache: true
+
           - name: setup-node
             uses: setup-node
             with:
@@ -59,7 +65,7 @@ stages:
               echo 'prettier version:' && npx prettier --version
 
           - name: pre-commit
-            uses: openlibing-pre-commit-action
+            uses: openlibing/pre-commit-action@v1.0.40
             with:
               extra_args: ${{ inputs.extra_args }}
 
