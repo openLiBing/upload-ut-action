@@ -178,7 +178,7 @@ async function run() {
     await ObsUploader.uploadAndNotify(
       standardJson,
       { repoName, pipelineRunId, gitUrl, branchName },
-      { envType }
+      { envType, obsAcl }
     );
   } catch (err) {
     console.log(`[ERROR] 上传/回调链路失败: ${err.message}`);
