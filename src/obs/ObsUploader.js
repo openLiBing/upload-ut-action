@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const ObsClient = require('esdk-obs-nodejs');
 
 /**
@@ -81,11 +82,20 @@ async function withRetryAsync(fn, { retries = 3, label = '' } = {}) {
   throw lastErr;
 }
 
+/** 对象 Key 段清洗：仅保留字母数字与 . _ -，其余折叠为单连字符，空结果回退默认值 */
+function sanitizeKeySegment(value, fallback) {
+  const s = String(value || fallback)
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return s || fallback;
+}
+
 /** 构建 OBS 对象 Key：ut-coverage-action/{repoName}/{yyyyMMdd}.{HH}/{runId|manual}/ut-coverage.json */
 function buildObsKey(repoName, runId, date = new Date()) {
-  const name = String(repoName || 'unknown-repo').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+  const name = sanitizeKeySegment(repoName, 'unknown-repo');
+  const rid = sanitizeKeySegment(runId, 'manual');
   const dateStr = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}.${String(date.getHours()).padStart(2, '0')}`;
-  return `${OBS_PREFIX}/${name}/${dateStr}/${runId || 'manual'}/${OBS_OBJECT_NAME}`;
+  return `${OBS_PREFIX}/${name}/${dateStr}/${rid}/${OBS_OBJECT_NAME}`;
 }
 
 /** OIDC 换证：返回 { accessKeyId, secretAccessKey, securityToken } */
@@ -109,11 +119,14 @@ async function uploadJson(standardJson, key, cred, acl = 'public-read') {
     secret_access_key: cred.secretAccessKey,
     security_token: cred.securityToken,
     server,
+    // esdk-obs-nodejs 默认 sslVerify=false 会关闭 TLS 证书校验（Ref #8/#14），显式恢复校验
+    sslVerify: true,
   });
   await Promise.resolve();
 
   const tmpDir = os.tmpdir();
-  const tmpFile = path.join(tmpDir, `ut-coverage-${Date.now()}.json`);
+  // 随机后缀避免可预测临时文件名（Ref #5）：同毫秒并发/共享 tmpdir 下不可被抢注或预读
+  const tmpFile = path.join(tmpDir, `ut-coverage-${Date.now()}-${crypto.randomUUID()}.json`);
   fs.writeFileSync(tmpFile, JSON.stringify(standardJson, null, 2), 'utf-8');
 
   try {
