@@ -1,5 +1,5 @@
 name: "upload-ut-action"
-version: 1.0.5
+version: 1.0.0
 author: "openLiBing"
 description: "解析多种单元测试覆盖率报告（jacoco / coverage.py / go test / gcov+llvm-cov / c8 / cargo-llvm-cov）为标准 JSON，上传 OBS 并回调 OpenLibing coderepo（OIDC 认证，SDK 自包含换证，无需 huaweicloud-oidc-auth 插件）"
 

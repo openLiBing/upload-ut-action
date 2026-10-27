@@ -1,0 +1,22 @@
+name: code-metrics
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  repository: read
+  id-token: write # openlibing/code-metrics-action 插件使用OIDC联邦认证，需要权限 id-token: write
+
+jobs:
+  code-metrics:
+    name: code-metrics
+    runs-on: ["self-hosted", "region=cn"]
+    steps:
+      - name: checkout
+        uses: checkout
+
+      - name: code-metrics
+        uses: openlibing/code-metrics-action@v1.0.2  # 尽量使用最新版本
