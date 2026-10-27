@@ -119,8 +119,10 @@ async function uploadJson(standardJson, key, cred, acl = 'public-read') {
     secret_access_key: cred.secretAccessKey,
     security_token: cred.securityToken,
     server,
-    // esdk-obs-nodejs 默认 sslVerify=false 会关闭 TLS 证书校验（Ref #8/#14），显式恢复校验
-    sslVerify: true,
+    // esdk-obs-nodejs 默认关闭 TLS 证书校验（Ref #8/#14），显式恢复校验。
+    // SDK 构造参数键名为 ssl_verify（initFactory 读取 param.ssl_verify），
+    // 误写 sslVerify 会被忽略（上一轮整改回归缺陷，本处修正）
+    ssl_verify: true,
   });
   await Promise.resolve();
 
@@ -137,7 +139,7 @@ async function uploadJson(standardJson, key, cred, acl = 'public-read') {
       }
     };
     await withRetryAsync(
-      () => client.putObject({ Bucket: OBS_BUCKET, Key: key, SourceFile: tmpFile, ACL: 'public-read' }).then(assertOk),
+      () => client.putObject({ Bucket: OBS_BUCKET, Key: key, SourceFile: tmpFile, ACL: acl }).then(assertOk),
       { label: `OBS 上传 ${key}` }
     );
     return `${OBS_READ_ENDPOINT}/${key}`;
