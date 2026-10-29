@@ -139,8 +139,14 @@ function resolveRegion() {
 async function run() {
   const reportDir = getInput('report_dir');
   const envType = (getInput('env_type') || 'prod').toLowerCase();
-  const obsAcl = getInput('obs_acl') || 'public-read';
   const region = resolveRegion();
+  // obs_acl：OBS 对象 ACL（Ref #1）。白名单校验后透传 ObsUploader；
+  // 缺省 public-read 与原行为一致（后端当前匿名 GET 下载依赖该默认值）
+  const obsAclRaw = (getInput('obs_acl') || 'public-read').trim().toLowerCase();
+  if (obsAclRaw !== 'public-read' && obsAclRaw !== 'private') {
+    throw new Error(`obs_acl 参数非法（${obsAclRaw}）：仅允许 public-read / private`);
+  }
+  const obsAcl = obsAclRaw;
 
   const gitUrl = resolveGitUrl();
   const branchName = resolveBranch();
@@ -454,8 +460,10 @@ async function uploadJson(standardJson, key, cred, acl = 'public-read') {
     secret_access_key: cred.secretAccessKey,
     security_token: cred.securityToken,
     server,
-    // esdk-obs-nodejs 默认 sslVerify=false 会关闭 TLS 证书校验（Ref #8/#14），显式恢复校验
-    sslVerify: true,
+    // esdk-obs-nodejs 默认关闭 TLS 证书校验（Ref #8/#14），显式恢复校验。
+    // SDK 构造参数键名为 ssl_verify（initFactory 读取 param.ssl_verify），
+    // 误写 sslVerify 会被忽略（上一轮整改回归缺陷，本处修正）
+    ssl_verify: true,
   });
   await Promise.resolve();
 
