@@ -121,6 +121,13 @@ async function run() {
   const reportDir = getInput('report_dir');
   const envType = (getInput('env_type') || 'prod').toLowerCase();
   const region = resolveRegion();
+  // obs_acl：OBS 对象 ACL（Ref #1）。白名单校验后透传 ObsUploader；
+  // 缺省 public-read 与原行为一致（后端当前匿名 GET 下载依赖该默认值）
+  const obsAclRaw = (getInput('obs_acl') || 'public-read').trim().toLowerCase();
+  if (obsAclRaw !== 'public-read' && obsAclRaw !== 'private') {
+    throw new Error(`obs_acl 参数非法（${obsAclRaw}）：仅允许 public-read / private`);
+  }
+  const obsAcl = obsAclRaw;
 
   const gitUrl = resolveGitUrl();
   const branchName = resolveBranch();
@@ -185,7 +192,7 @@ async function run() {
     await ObsUploader.uploadAndNotify(
       standardJson,
       { repoName, pipelineRunId, gitUrl, branchName },
-      { envType }
+      { envType, obsAcl }
     );
   } catch (err) {
     console.log(`[ERROR] 上传/回调链路失败: ${err.message}`);
@@ -25653,9 +25660,12 @@ try {
 const APIG_SIGN_REGION = 'cn-southwest-2'; // APIG V11 签名区域
 const OIDC_API_PREFIX = '/action-api'; // OIDC 回调路径前缀（网关 IAM 认证）
 const CALLBACK_PATH = '/ut/coverage/report'; // coderepo UtCoverageController.reportUtCoverage
-const OIDC_PROD_BASE = 'https://apig.openlibing.com';
-// beta.apig.openlibing.com 证书未绑定，临时使用已发布 /action-api 的 APIG 域名
-const OIDC_BETA_BASE = 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com';
+// Ref issue #2：OIDC 业务 API 基址支持环境变量注入（OPENLIBING_APIG_PROD_BASE /
+// OPENLIBING_APIG_BETA_BASE），默认值仅为功能必需回退（公司 OpenLibing 平台
+// APIG 域名），已登记白名单作为合规例外，不得删除或替换
+const OIDC_PROD_BASE = process.env.OPENLIBING_APIG_PROD_BASE || 'https://apig.openlibing.com'; // gitleaks:allow 功能必需的业务 API 默认回退地址，运行时优先环境变量注入
+// beta.apig.openlibing.com 证书未绑定，临时使用已发布 /action-api 的 APIG 域名 // gitleaks:allow 功能必需的业务 API 默认回退地址（beta），运行时优先环境变量注入
+const OIDC_BETA_BASE = process.env.OPENLIBING_APIG_BETA_BASE || 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com';
 
 const OBS_BUCKET = 'openlibing-gitcode-action';
 const OBS_READ_ENDPOINT = 'https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com';
@@ -25729,8 +25739,8 @@ async function getOidcCredentials() {
   return cred;
 }
 
-/** OBS 上传（public-read + 指数退避重试），返回下载 URL */
-async function uploadJson(standardJson, key, cred) {
+/** OBS 上传（ACL 可配置 + 指数退避重试），返回下载 URL */
+async function uploadJson(standardJson, key, cred, acl = 'public-read') {
   if (!configure || !ObsClient) throw new Error('OBS SDK 未加载，无法上传');
   const { region } = configure({});
   const server = `https://obs.${region}.myhuaweicloud.com`;
@@ -25760,7 +25770,7 @@ async function uploadJson(standardJson, key, cred) {
       }
     };
     await withRetryAsync(
-      () => client.putObject({ Bucket: OBS_BUCKET, Key: key, SourceFile: tmpFile, ACL: 'public-read' }).then(assertOk),
+      () => client.putObject({ Bucket: OBS_BUCKET, Key: key, SourceFile: tmpFile, ACL: acl }).then(assertOk),
       { label: `OBS 上传 ${key}` }
     );
     return `${OBS_READ_ENDPOINT}/${key}`;
@@ -25806,12 +25816,13 @@ async function sendCallbackOidc(url, payload, cred) {
  * @param {{envType: string}} opts2 环境类型
  * @returns {Promise<{obsUrl: string}>}
  */
-async function uploadAndNotify(standardJson, opts, { envType = 'prod' } = {}) {
+async function uploadAndNotify(standardJson, opts, { envType = 'prod', obsAcl = 'public-read' } = {}) {
   const isBeta = String(envType || 'prod').toLowerCase() === 'beta';
   const callbackBase = isBeta ? OIDC_BETA_BASE : OIDC_PROD_BASE;
 
   console.log(`[INFO] 认证模式: OIDC 联邦认证（SDK 自包含换证）`);
   console.log(`[INFO] 回调地址: ${callbackBase}${OIDC_API_PREFIX}${CALLBACK_PATH}`);
+  console.log(`[INFO] OBS 对象 ACL: ${obsAcl}${obsAcl === 'public-read' ? '（默认；后端支持带凭证下载后建议切换 private）' : ''}`);
 
   // 1. OIDC 换证
   const cred = await getOidcCredentials();
@@ -25820,7 +25831,7 @@ async function uploadAndNotify(standardJson, opts, { envType = 'prod' } = {}) {
   // 2. 上传 OBS
   const key = buildObsKey(opts.repoName, opts.pipelineRunId);
   console.log(`[INFO] OBS 路径: obs://${OBS_BUCKET}/${key}`);
-  const obsUrl = await uploadJson(standardJson, key, cred);
+  const obsUrl = await uploadJson(standardJson, key, cred, obsAcl);
   console.log(`[OK] OBS 上传成功: ${obsUrl}`);
 
   // 3. 回调 APIG（回调失败不阻断：OBS 已上传，数据可后续补导入）
