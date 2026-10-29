@@ -20,6 +20,16 @@ test('buildObsKey runId 缺失用 manual', () => {
   assert.strictEqual(key, 'ut-coverage-action/r/20260101.00/manual/ut-coverage.json');
 });
 
+test('buildObsKey runId 清洗非法字符（Ref #11）', () => {
+  const key = ObsUploader.buildObsKey('r', 'run/../x y?z', new Date(2026, 0, 1, 0, 0));
+  assert.strictEqual(key, 'ut-coverage-action/r/20260101.00/run-..-x-y-z/ut-coverage.json');
+});
+
+test('buildObsKey runId 全非法字符回退 manual（Ref #11）', () => {
+  const key = ObsUploader.buildObsKey('r', '///', new Date(2026, 0, 1, 0, 0));
+  assert.strictEqual(key, 'ut-coverage-action/r/20260101.00/manual/ut-coverage.json');
+});
+
 test('回调路径前缀与常量正确', () => {
   assert.strictEqual(ObsUploader.OIDC_API_PREFIX, '/action-api');
   assert.strictEqual(ObsUploader.CALLBACK_PATH, '/ut/coverage/report');
