@@ -132,6 +132,7 @@ function resolveRegion() {
 async function run() {
   const reportDir = getInput('report_dir');
   const envType = (getInput('env_type') || 'prod').toLowerCase();
+  const obsAcl = getInput('obs_acl') || 'public-read';
   const region = resolveRegion();
 
   const gitUrl = resolveGitUrl();
