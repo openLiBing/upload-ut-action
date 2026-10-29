@@ -1,30 +1,29 @@
 /******/ (() => { // webpackBootstrap
 /******/ 	var __webpack_modules__ = ({
 
-/***/ 6136:
+/***/ 1738:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const { installFetchPolyfill } = __nccwpck_require__(7849);
+const { installFetchPolyfill } = __nccwpck_require__(6799);
 // GitCode 插件 runtime 为 node16，无全局 fetch；注入最小 polyfill，否则
 // OIDC SDK 会回退 require('undici') 导致 "Cannot find module 'undici'"。
 installFetchPolyfill();
 
-const { execSync } = __nccwpck_require__(5317);
 const fs = __nccwpck_require__(9896);
 const path = __nccwpck_require__(6928);
 
-const ReportScanner = __nccwpck_require__(1845);
-const JacocoParser = __nccwpck_require__(5603);
-const CoveragePyParser = __nccwpck_require__(4007);
-const GoTestParser = __nccwpck_require__(9364);
-const GcovParser = __nccwpck_require__(6985);
-const C8Parser = __nccwpck_require__(165);
-const CargoLlvmCovParser = __nccwpck_require__(8445);
-const CoverageNormalizer = __nccwpck_require__(6640);
-const ObsUploader = __nccwpck_require__(5140);
+const ReportScanner = __nccwpck_require__(8727);
+const JacocoParser = __nccwpck_require__(4577);
+const CoveragePyParser = __nccwpck_require__(9309);
+const GoTestParser = __nccwpck_require__(3354);
+const GcovParser = __nccwpck_require__(9315);
+const C8Parser = __nccwpck_require__(91);
+const CargoLlvmCovParser = __nccwpck_require__(5519);
+const CoverageNormalizer = __nccwpck_require__(6670);
+const ObsUploader = __nccwpck_require__(2334);
 
 const PARSER_MAP = {
   jacoco: JacocoParser,
@@ -65,17 +64,37 @@ function setOutput(key, value) {
   console.log(`[OUTPUT] ${key}=${value}`);
 }
 
-function execCapture(cmd) {
-  try {
-    return execSync(cmd, { encoding: 'utf-8', shell: '/bin/bash' }).trim();
-  } catch (e) {
-    return '';
+/**
+ * 在 root 下查找 .git 目录，返回首个命中的 .git 路径（无则 null）。
+ * 等价于 `find <root> -maxdepth 3 -type d -name ".git"`，改用 Node fs 递归实现，
+ * workspace 路径不再拼入 shell 命令（Ref issue #16/#20 命令注入整改）。
+ */
+function findGitDir(root, maxDepth = 3) {
+  let dirs = [root];
+  for (let depth = 0; depth < maxDepth && dirs.length > 0; depth++) {
+    const next = [];
+    for (const dir of dirs) {
+      let entries;
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch (e) {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const full = path.join(dir, entry.name);
+        if (entry.name === '.git') return full;
+        next.push(full);
+      }
+    }
+    dirs = next;
   }
+  return null;
 }
 
 /** 解析仓库根目录：优先取 workspace 下 git 仓库根，兜底 workspace 本身 */
 function resolveRepoRoot(workspace) {
-  const gitDir = execCapture(`find ${workspace} -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
+  const gitDir = findGitDir(workspace);
   if (gitDir) {
     console.log(`[INFO] 仓库根目录（git 根）: ${path.dirname(gitDir)}`);
     return path.dirname(gitDir);
@@ -206,7 +225,7 @@ async function run() {
   setOutput('result', 'success');
 }
 
-module.exports = { run };
+module.exports = { run, findGitDir, resolveRepoRoot };
 
 if (require.main === require.cache[eval('__filename')]) {
   run().catch((err) => {
@@ -219,7 +238,1278 @@ if (require.main === require.cache[eval('__filename')]) {
 
 /***/ }),
 
-/***/ 578:
+/***/ 6670:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+const { pct } = __nccwpck_require__(6208);
+
+/**
+ * 覆盖率标准 JSON 归一化器。
+ *
+ * 职责：
+ * 1. 合并多个解析结果（同一代码仓可能产出多种工具报告，如 Java + JS 混合）：
+ *    - 文件明细直接拼接；
+ *    - 总体指标按 covered/total 重新求和（等价于报告级 totals 聚合）。
+ * 2. 文件路径归一化：剥离仓库根前缀、file:// 前缀、前导 ./ 与 /，统一为仓库相对路径。
+ * 3. 组装标准上报 JSON：仅保留行覆盖率 lineCoverage（唯一必填指标）。
+ */
+
+/** 文件路径归一化：机器绝对路径 / file:// / ./ 前缀 → 仓库相对路径 */
+function normalizeFilePath(p, repoRoot) {
+  let fp = String(p == null ? '' : p).replace(/\\/g, '/');
+  if (fp.startsWith('file://')) fp = fp.slice('file://'.length);
+  if (repoRoot) {
+    const root = String(repoRoot).replace(/\\/g, '/').replace(/\/+$/, '');
+    if (fp.startsWith(root + '/')) fp = fp.slice(root.length + 1);
+  }
+  fp = fp.replace(/^\.\//, '').replace(/^\/+/, '');
+  return fp;
+}
+
+/** 过滤并归一化文件明细数组：剔除无行数据的条目，路径归一化，仅保留行覆盖率指标 */
+function buildFileDetails(files, repoRoot) {
+  const out = [];
+  const seen = new Map(); // 同路径去重（多报告合并时同文件只保留首个）
+  for (const f of files) {
+    const lineTotal = Number(f.lineTotal || 0);
+    if (!(lineTotal > 0)) continue;
+    const filePath = normalizeFilePath(f.filePath, repoRoot);
+    if (!filePath) continue;
+    if (seen.has(filePath)) continue;
+    seen.set(filePath, true);
+    out.push({
+      filePath,
+      lineCoverage: Number(f.lineCoverage),
+      lineCovered: Number(f.lineCovered || 0),
+      lineTotal,
+    });
+  }
+  return out;
+}
+
+/**
+ * 合并解析结果并组装标准 JSON。
+ * @param {Array} parsedList 各解析器返回的统一中间结构
+ * @param {{gitUrl: string, branchName: string, pipelineRunId: string, commitId: string}} meta 上报元数据
+ * @param {string} [repoRoot] 仓库根目录（用于文件路径归一化）
+ * @returns {Object} 标准上报 JSON
+ */
+function normalize(parsedList, meta, repoRoot) {
+  const agg = { line: { covered: 0, total: 0 } };
+  const allFiles = [];
+
+  for (const parsed of parsedList || []) {
+    if (!parsed || !parsed.metrics) continue;
+    const m = parsed.metrics;
+    if (m.lineTotal != null) {
+      agg.line.covered += Number(m.lineCovered || 0);
+      agg.line.total += Number(m.lineTotal);
+    }
+    if (Array.isArray(parsed.files)) {
+      allFiles.push(...parsed.files);
+    }
+  }
+
+  if (!(agg.line.total > 0)) {
+    throw new Error('未解析到有效的行覆盖率数据（lineCoverage 是唯一必填指标）');
+  }
+
+  const out = {
+    gitUrl: meta.gitUrl || '',
+    branchName: meta.branchName || '',
+    pipelineRunId: meta.pipelineRunId || '',
+    commitId: meta.commitId || '',
+    lineCoverage: pct(agg.line.covered, agg.line.total),
+  };
+
+  const fileDetails = buildFileDetails(allFiles, repoRoot);
+  out.fileDetails = fileDetails;
+  return out;
+}
+
+module.exports = { normalize, normalizeFilePath, buildFileDetails };
+
+
+/***/ }),
+
+/***/ 2334:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+const fs = __nccwpck_require__(9896);
+const path = __nccwpck_require__(6928);
+const os = __nccwpck_require__(857);
+const crypto = __nccwpck_require__(6982);
+const ObsClient = __nccwpck_require__(3751);
+
+/**
+ * OBS 上传 + APIG 回调（OIDC 免静态凭证）。
+ *
+ * 链路：OIDC ID Token 自申请 → 华为云 STS 换临时 AK/SK/SecurityToken →
+ *       OBS putObject（public-read，后端匿名 HTTP GET 下载）→ APIG V11 签名回调。
+ * OBS 上传与 APIG 回调均指数退避重试（默认 3 次）。
+ */
+
+let V11Signer = null;
+let sendRequest = null;
+let getCredentials = null;
+let configure = null;
+try {
+  ({ V11Signer, sendRequest, getCredentials, configure } = __nccwpck_require__(3987));
+} catch (e) {
+  console.log('[ERROR] @openlibing/huaweicloud-oidc-client 加载失败，请重新构建 dist 后重试');
+}
+
+// ---------- 常量 ----------
+
+const APIG_SIGN_REGION = 'cn-southwest-2'; // APIG V11 签名区域
+const OIDC_API_PREFIX = '/action-api'; // OIDC 回调路径前缀（网关 IAM 认证）
+const CALLBACK_PATH = '/ut/coverage/report'; // coderepo UtCoverageController.reportUtCoverage
+// Ref issue #2：OIDC 业务 API 基址支持环境变量注入（OPENLIBING_APIG_PROD_BASE /
+// OPENLIBING_APIG_BETA_BASE），默认值仅为功能必需回退（公司 OpenLibing 平台
+// APIG 域名），已登记白名单作为合规例外，不得删除或替换
+const OIDC_PROD_BASE = process.env.OPENLIBING_APIG_PROD_BASE || 'https://apig.openlibing.com'; // gitleaks:allow 功能必需的业务 API 默认回退地址，运行时优先环境变量注入
+// beta.apig.openlibing.com 证书未绑定，临时使用已发布 /action-api 的 APIG 域名 // gitleaks:allow 功能必需的业务 API 默认回退地址（beta），运行时优先环境变量注入
+const OIDC_BETA_BASE = process.env.OPENLIBING_APIG_BETA_BASE || 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com';
+
+const OBS_BUCKET = 'openlibing-gitcode-action';
+const OBS_READ_ENDPOINT = 'https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com';
+const OBS_PREFIX = 'ut-coverage-action';
+const OBS_OBJECT_NAME = 'ut-coverage.json';
+
+// ---------- 通用辅助 ----------
+
+/** 同步指数退避重试：默认 3 次，失败后 sleep(2^(n-1) 秒) 再试 */
+function withRetrySync(fn, { retries = 3, label = '' } = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt === retries) break;
+      const delaySec = Math.pow(2, attempt - 1);
+      console.log(`[WARN] ${label} 第 ${attempt} 次失败（${err.message}），${delaySec}s 后重试（${attempt + 1}/${retries}）`);
+      const { execSync } = __nccwpck_require__(5317);
+      try {
+        execSync(`sleep ${delaySec}`, { shell: '/bin/bash' });
+      } catch (e) {
+        // sleep 命令不可用时兜底 JS 等待
+      }
+    }
+  }
+  throw lastErr;
+}
+
+/** 异步指数退避重试：默认 3 次，失败后延迟 2^(n-1) 秒再试 */
+async function withRetryAsync(fn, { retries = 3, label = '' } = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt === retries) break;
+      const delayMs = Math.pow(2, attempt - 1) * 1000;
+      console.log(`[WARN] ${label} 第 ${attempt} 次失败（${err.message}），${delayMs}ms 后重试（${attempt + 1}/${retries}）`);
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
+/** 对象 Key 段清洗：仅保留字母数字与 . _ -，其余折叠为单连字符，空结果回退默认值 */
+function sanitizeKeySegment(value, fallback) {
+  const s = String(value || fallback)
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return s || fallback;
+}
+
+/** 构建 OBS 对象 Key：ut-coverage-action/{repoName}/{yyyyMMdd}.{HH}/{runId|manual}/ut-coverage.json */
+function buildObsKey(repoName, runId, date = new Date()) {
+  const name = sanitizeKeySegment(repoName, 'unknown-repo');
+  const rid = sanitizeKeySegment(runId, 'manual');
+  const dateStr = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}.${String(date.getHours()).padStart(2, '0')}`;
+  return `${OBS_PREFIX}/${name}/${dateStr}/${rid}/${OBS_OBJECT_NAME}`;
+}
+
+/** OIDC 换证：返回 { accessKeyId, secretAccessKey, securityToken } */
+async function getOidcCredentials() {
+  if (!getCredentials) throw new Error('@openlibing/huaweicloud-oidc-client 未加载，无法 OIDC 换证');
+  const cred = await getCredentials();
+  if (!cred || !cred.accessKeyId || !cred.secretAccessKey) {
+    throw new Error('OIDC 换证结果缺少 AK/SK');
+  }
+  return cred;
+}
+
+/** OBS 上传（ACL 可配置 + 指数退避重试），返回下载 URL */
+async function uploadJson(standardJson, key, cred, acl = 'public-read') {
+  if (!configure || !ObsClient) throw new Error('OBS SDK 未加载，无法上传');
+  const { region } = configure({});
+  const server = `https://obs.${region}.myhuaweicloud.com`;
+  // esdk-obs-nodejs initFactory 为 fire-and-forget，构造后让出一个微任务等待签名上下文初始化
+  const client = new ObsClient({
+    access_key_id: cred.accessKeyId,
+    secret_access_key: cred.secretAccessKey,
+    security_token: cred.securityToken,
+    server,
+    // esdk-obs-nodejs 默认关闭 TLS 证书校验（Ref #8/#14），显式恢复校验。
+    // SDK 构造参数键名为 ssl_verify（initFactory 读取 param.ssl_verify），
+    // 误写 sslVerify 会被忽略（上一轮整改回归缺陷，本处修正）
+    ssl_verify: true,
+  });
+  await Promise.resolve();
+
+  const tmpDir = os.tmpdir();
+  // 随机后缀避免可预测临时文件名（Ref #5）：同毫秒并发/共享 tmpdir 下不可被抢注或预读
+  const tmpFile = path.join(tmpDir, `ut-coverage-${Date.now()}-${crypto.randomUUID()}.json`);
+  fs.writeFileSync(tmpFile, JSON.stringify(standardJson, null, 2), 'utf-8');
+
+  try {
+    const assertOk = (result) => {
+      const msg = (result && result.CommonMsg) || {};
+      if (!(msg.Status >= 200 && msg.Status < 300)) {
+        throw new Error(`OBS 上传失败 (${msg.Status})${msg.Code ? ' [' + msg.Code + ']' : ''}: ${msg.Message || '未知错误'}`);
+      }
+    };
+    await withRetryAsync(
+      () => client.putObject({ Bucket: OBS_BUCKET, Key: key, SourceFile: tmpFile, ACL: acl }).then(assertOk),
+      { label: `OBS 上传 ${key}` }
+    );
+    return `${OBS_READ_ENDPOINT}/${key}`;
+  } finally {
+    try {
+      fs.unlinkSync(tmpFile);
+    } catch (e) {
+      // 临时文件清理失败不影响结果
+    }
+    await client.close();
+  }
+}
+
+/** APIG V11 签名回调（OIDC 临时凭证 + X-Security-Token），失败抛错供重试 */
+async function sendCallbackOidc(url, payload, cred) {
+  if (!V11Signer || !sendRequest) {
+    throw new Error('@openlibing/huaweicloud-oidc-client 未加载，无法进行 OIDC 回调');
+  }
+  const signer = new V11Signer({ region: APIG_SIGN_REGION });
+  signer.Key = cred.accessKeyId;
+  signer.Secret = cred.secretAccessKey;
+  const headers = { 'Content-Type': 'application/json' };
+  if (cred.securityToken) headers['X-Security-Token'] = cred.securityToken;
+
+  const body = JSON.stringify(payload);
+  const signedHeaders = signer.sign('POST', url, headers, body);
+  const res = await sendRequest('POST', url, signedHeaders, body);
+
+  const data = res.data;
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error((data && (data.msg || data.message || data.error_msg)) || `HTTP ${res.status}`);
+  }
+  if (data && (data.code === 200 || data.code === 0)) {
+    return data;
+  }
+  throw new Error(`API 业务错误: code=${data && data.code}, msg=${data && (data.msg || data.message) || 'unknown'}`);
+}
+
+/**
+ * 执行完整上报：换证 → 上传 OBS → 回调 APIG。
+ * @param {Object} standardJson 标准上报 JSON
+ * @param {{repoName: string, pipelineRunId: string, gitUrl: string, branchName: string}} opts
+ * @param {{envType: string}} opts2 环境类型
+ * @returns {Promise<{obsUrl: string}>}
+ */
+async function uploadAndNotify(standardJson, opts, { envType = 'prod', obsAcl = 'public-read' } = {}) {
+  const isBeta = String(envType || 'prod').toLowerCase() === 'beta';
+  const callbackBase = isBeta ? OIDC_BETA_BASE : OIDC_PROD_BASE;
+
+  console.log(`[INFO] 认证模式: OIDC 联邦认证（SDK 自包含换证）`);
+  console.log(`[INFO] 回调地址: ${callbackBase}${OIDC_API_PREFIX}${CALLBACK_PATH}`);
+  console.log(`[INFO] OBS 对象 ACL: ${obsAcl}${obsAcl === 'public-read' ? '（默认；后端支持带凭证下载后建议切换 private）' : ''}`);
+
+  // 1. OIDC 换证
+  const cred = await getOidcCredentials();
+  console.log('[OK] 临时凭证获取成功（OIDC ID Token 自申请 + STS 换证）');
+
+  // 2. 上传 OBS
+  const key = buildObsKey(opts.repoName, opts.pipelineRunId);
+  console.log(`[INFO] OBS 路径: obs://${OBS_BUCKET}/${key}`);
+  const obsUrl = await uploadJson(standardJson, key, cred, obsAcl);
+  console.log(`[OK] OBS 上传成功: ${obsUrl}`);
+
+  // 3. 回调 APIG（回调失败不阻断：OBS 已上传，数据可后续补导入）
+  const callbackPayload = {
+    gitUrl: opts.gitUrl || '',
+    branchName: opts.branchName || '',
+    pipelineRunId: opts.pipelineRunId || '',
+    obsUrl,
+  };
+  const callbackUrl = `${callbackBase}${OIDC_API_PREFIX}${CALLBACK_PATH}`;
+  try {
+    const callbackResult = await withRetryAsync(
+      () => sendCallbackOidc(callbackUrl, callbackPayload, cred),
+      { label: 'APIG 回调' }
+    );
+    console.log(`[OK] 回调通知发送成功，回调时间: ${new Date().toISOString()}`);
+    console.log(`[INFO] 回调响应: ${JSON.stringify(callbackResult)}`);
+  } catch (err) {
+    console.log(`[WARN] 回调通知发送失败: ${err.message}`);
+    console.log('[INFO] OBS 上传已成功，回调失败不影响数据留存');
+  }
+
+  return { obsUrl };
+}
+
+module.exports = {
+  uploadAndNotify,
+  buildObsKey,
+  getOidcCredentials,
+  uploadJson,
+  sendCallbackOidc,
+  withRetrySync,
+  withRetryAsync,
+  OBS_BUCKET,
+  OBS_PREFIX,
+  OBS_READ_ENDPOINT,
+  CALLBACK_PATH,
+  OIDC_API_PREFIX,
+};
+
+
+/***/ }),
+
+/***/ 91:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+const fs = __nccwpck_require__(9896);
+const { pct } = __nccwpck_require__(6208);
+
+/**
+ * c8（V8 覆盖率）报告解析器（coverage-final.json）。
+ *
+ * 结构：顶层 key 为文件路径，value：
+ * {
+ *   "path": "...",
+ *   "statementMap": {"0": {"start": {"line": 1, "column": 0}, ...}, ...},
+ *   "fnMap": {"0": {"name": "...", "loc": {...}}, ...},
+ *   "branchMap": {"0": {"type": "if", "locations": [...]}, ...},
+ *   "s": {"0": 1, ...},      // 语句命中次数
+ *   "f": {"0": 1, ...},      // 函数命中次数
+ *   "b": {"0": [1, 0], ...}  // 分支命中次数数组
+ * }
+ *
+ * 行覆盖率：按 statementMap 起始行去重，行上有任何已覆盖语句即视为已覆盖（与 istanbul 行覆盖语义一致）；
+ * methodCoverage 取函数覆盖率；branchCoverage 取分支覆盖率。c8 不产出 class 覆盖率，缺省。
+ */
+
+function parseFileObj(fileObj) {
+  const statementMap = fileObj.statementMap || {};
+  const s = fileObj.s || {};
+  const fnMap = fileObj.fnMap || {};
+  const f = fileObj.f || {};
+  const branchMap = fileObj.branchMap || {};
+  const b = fileObj.b || {};
+
+  // 行覆盖：语句起始行去重
+  const lines = new Map(); // line -> covered(boolean)
+  for (const [id, stmt] of Object.entries(statementMap)) {
+    const startLine = stmt && stmt.start && stmt.start.line;
+    if (startLine == null) continue;
+    const hit = Number(s[id] || 0) > 0;
+    lines.set(startLine, lines.get(startLine) || hit);
+  }
+  let lineCovered = 0;
+  for (const covered of lines.values()) {
+    if (covered) lineCovered += 1;
+  }
+  const lineTotal = lines.size;
+
+  const item = { filePath: fileObj.path };
+  if (lineTotal > 0) {
+    item.lineCoverage = pct(lineCovered, lineTotal);
+    item.lineCovered = lineCovered;
+    item.lineTotal = lineTotal;
+  }
+
+  // 方法覆盖率（函数）
+  let methodCovered = 0;
+  const methodTotal = Object.keys(fnMap).length;
+  for (const [id, count] of Object.entries(f)) {
+    if (Number(count || 0) > 0) methodCovered += 1;
+  }
+  if (methodTotal > 0) {
+    item.methodCoverage = pct(methodCovered, methodTotal);
+    item.methodCovered = methodCovered;
+    item.methodTotal = methodTotal;
+  }
+
+  // 分支覆盖率
+  let branchCovered = 0;
+  let branchTotal = 0;
+  for (const [id, counts] of Object.entries(b)) {
+    const arr = Array.isArray(counts) ? counts : [counts];
+    const targetCount = branchMap[id] && Array.isArray(branchMap[id].locations) ? branchMap[id].locations.length : arr.length;
+    branchTotal += targetCount > 0 ? targetCount : arr.length;
+    branchCovered += arr.filter((v) => Number(v || 0) > 0).length;
+  }
+  if (branchTotal > 0) {
+    item.branchCoverage = pct(branchCovered, branchTotal);
+    item.branchCovered = branchCovered;
+    item.branchTotal = branchTotal;
+  }
+
+  return item;
+}
+
+function parseContent(data) {
+  const files = [];
+  let agg = { line: { covered: 0, total: 0 }, branch: { covered: 0, total: 0 }, method: { covered: 0, total: 0 } };
+
+  for (const [filePath, value] of Object.entries(data)) {
+    if (!value || typeof value !== 'object' || !value.statementMap) continue;
+    const item = parseFileObj({ ...value, path: filePath });
+    if (!item.lineTotal) continue;
+    files.push(item);
+    agg.line.covered += item.lineCovered || 0;
+    agg.line.total += item.lineTotal || 0;
+    if (item.branchTotal) {
+      agg.branch.covered += item.branchCovered || 0;
+      agg.branch.total += item.branchTotal;
+    }
+    if (item.methodTotal) {
+      agg.method.covered += item.methodCovered || 0;
+      agg.method.total += item.methodTotal;
+    }
+  }
+
+  const metrics = { lineCoverage: pct(agg.line.covered, agg.line.total), lineCovered: agg.line.covered, lineTotal: agg.line.total };
+  for (const type of ['branch', 'method']) {
+    if (agg[type].total > 0) {
+      metrics[`${type}Coverage`] = pct(agg[type].covered, agg[type].total);
+      metrics[`${type}Covered`] = agg[type].covered;
+      metrics[`${type}Total`] = agg[type].total;
+    }
+  }
+
+  return { tool: 'c8', metrics, files };
+}
+
+function parseFile(file) {
+  return parseContent(JSON.parse(fs.readFileSync(file, 'utf-8')));
+}
+
+module.exports = { parseFile, parseContent, parseFileObj };
+
+
+/***/ }),
+
+/***/ 5519:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+const fs = __nccwpck_require__(9896);
+const { pct } = __nccwpck_require__(6208);
+
+/**
+ * llvm-cov export JSON 报告解析器（cargo-llvm-cov --json / llvm-cov export --format=json）。
+ *
+ * 结构：
+ * {
+ *   "data": [
+ *     {
+ *       "files": [
+ *         {
+ *           "filename": "src/lib.rs",
+ *           "summary": {
+ *             "lines":      {"count": 100, "covered": 80, "percent": 80.0},
+ *             "functions":  {"count": 5, "covered": 4, "percent": 80.0},
+ *             "branches":   {"count": 10, "covered": 6, "percent": 60.0},
+ *             "regions":    {...},
+ *             "instantiations": {...}
+ *           }
+ *         }
+ *       ],
+ *       "totals": { "lines": {...}, "functions": {...}, "branches": {...}, ... }
+ *     }
+ *   ]
+ * }
+ *
+ * lineCoverage 取 lines 统计；methodCoverage 取 functions；branchCoverage 取 branches
+ * （rust 某些 target 的 branches 可能为 null，此时该指标缺省）。class 覆盖率不适用，缺省。
+ */
+
+const SUMMARY_KEYS = { lines: 'line', functions: 'method', branches: 'branch' };
+
+function buildItemFromSummary(filePath, summary) {
+  const s = summary || {};
+  const item = { filePath };
+  for (const [key, prefix] of Object.entries(SUMMARY_KEYS)) {
+    const stat = s[key];
+    if (!stat || stat.count == null || stat.covered == null) continue;
+    const total = Number(stat.count);
+    const covered = Number(stat.covered);
+    if (total <= 0) continue;
+    item[`${prefix}Coverage`] = pct(covered, total);
+    item[`${prefix}Covered`] = covered;
+    item[`${prefix}Total`] = total;
+  }
+  return item;
+}
+
+function parseContent(data) {
+  const d = data && Array.isArray(data.data) ? data.data[0] : null;
+  if (!d) {
+    throw new Error('无法解析 llvm-cov export JSON：缺少 data 数组');
+  }
+
+  const files = [];
+  let agg = { line: { covered: 0, total: 0 }, branch: { covered: 0, total: 0 }, method: { covered: 0, total: 0 } };
+
+  for (const f of d.files || []) {
+    const item = buildItemFromSummary(f.filename, f.summary);
+    if (!item.lineTotal) continue;
+    files.push(item);
+    for (const [key, prefix] of Object.entries(SUMMARY_KEYS)) {
+      const stat = f.summary && f.summary[key];
+      if (stat && stat.count != null && stat.covered != null) {
+        agg[prefix].covered += Number(stat.covered);
+        agg[prefix].total += Number(stat.count);
+      }
+    }
+  }
+
+  // 总体优先取 data[0].totals（与 files 求和一致）
+  const totals = d.totals || {};
+  const metrics = {};
+  if (totals.lines && totals.lines.count != null) {
+    metrics.lineCoverage = pct(totals.lines.covered, totals.lines.count);
+    metrics.lineCovered = Number(totals.lines.covered);
+    metrics.lineTotal = Number(totals.lines.count);
+  } else {
+    metrics.lineCoverage = pct(agg.line.covered, agg.line.total);
+    metrics.lineCovered = agg.line.covered;
+    metrics.lineTotal = agg.line.total;
+  }
+  for (const [key, prefix] of Object.entries(SUMMARY_KEYS)) {
+    if (prefix === 'line') continue;
+    const stat = totals[key];
+    if (stat && stat.count != null && Number(stat.count) > 0) {
+      metrics[`${prefix}Coverage`] = pct(stat.covered, stat.count);
+      metrics[`${prefix}Covered`] = Number(stat.covered);
+      metrics[`${prefix}Total`] = Number(stat.count);
+    } else if (agg[prefix].total > 0) {
+      metrics[`${prefix}Coverage`] = pct(agg[prefix].covered, agg[prefix].total);
+      metrics[`${prefix}Covered`] = agg[prefix].covered;
+      metrics[`${prefix}Total`] = agg[prefix].total;
+    }
+  }
+
+  return { tool: 'cargo-llvm-cov', metrics, files };
+}
+
+function parseFile(file) {
+  return parseContent(JSON.parse(fs.readFileSync(file, 'utf-8')));
+}
+
+module.exports = { parseFile, parseContent, buildItemFromSummary };
+
+
+/***/ }),
+
+/***/ 9309:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+const fs = __nccwpck_require__(9896);
+const { pct } = __nccwpck_require__(6208);
+
+/**
+ * coverage.py 覆盖率报告解析器（coverage.json）。
+ *
+ * 结构：
+ * {
+ *   "meta": {"format": 2, ...},
+ *   "files": {
+ *     "path/to/a.py": {
+ *       "executed_lines": [...],
+ *       "summary": {"covered_lines": 3, "num_statements": 5, "percent_covered": 60.0,
+ *                   "missing_branches": 1, "branches": 2}
+ *     }
+ *   },
+ *   "totals": {"covered_lines": 100, "num_statements": 200, "percent_covered": 50.0,
+ *              "missing_branches": 3, "branches": 4}
+ * }
+ *
+ * lineCoverage 由 percent_covered（totals）提供；branchCoverage = (branches - missing_branches) / branches。
+ * coverage.py 不产出 method/class 覆盖率，缺省。
+ */
+
+function buildFileItem(filePath, summary) {
+  const s = summary || {};
+  const item = { filePath };
+  let has = false;
+  if (s.num_statements != null && s.covered_lines != null) {
+    item.lineCoverage = pct(s.covered_lines, s.num_statements);
+    item.lineCovered = s.covered_lines;
+    item.lineTotal = s.num_statements;
+    has = true;
+  }
+  if (s.branches != null && Number(s.branches) > 0) {
+    const covered = Number(s.branches) - Number(s.missing_branches || 0);
+    item.branchCoverage = pct(covered, s.branches);
+    item.branchCovered = covered;
+    item.branchTotal = s.branches;
+  }
+  return has ? item : null;
+}
+
+function parseContent(data) {
+  const totals = data.totals || {};
+  const filesObj = data.files || {};
+  const files = [];
+
+  for (const [filePath, info] of Object.entries(filesObj)) {
+    if (!info || typeof info !== 'object') continue;
+    const item = buildFileItem(filePath, info.summary);
+    if (item && item.lineTotal) files.push(item);
+  }
+
+  const metrics = {};
+  if (totals.percent_covered != null) {
+    metrics.lineCoverage = pct(totals.percent_covered, 100);
+  } else if (totals.num_statements != null && totals.covered_lines != null) {
+    metrics.lineCoverage = pct(totals.covered_lines, totals.num_statements);
+  }
+  if (totals.num_statements != null) {
+    metrics.lineCovered = Number(totals.covered_lines != null ? totals.covered_lines : 0);
+    metrics.lineTotal = Number(totals.num_statements);
+  }
+  if (totals.branches != null && Number(totals.branches) > 0) {
+    const covered = Number(totals.branches) - Number(totals.missing_branches || 0);
+    metrics.branchCoverage = pct(covered, totals.branches);
+    metrics.branchCovered = covered;
+    metrics.branchTotal = Number(totals.branches);
+  }
+
+  return { tool: 'coverage-py', metrics, files };
+}
+
+function parseFile(file) {
+  return parseContent(JSON.parse(fs.readFileSync(file, 'utf-8')));
+}
+
+module.exports = { parseFile, parseContent, buildFileItem };
+
+
+/***/ }),
+
+/***/ 9315:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+const fs = __nccwpck_require__(9896);
+const path = __nccwpck_require__(6928);
+const { pct } = __nccwpck_require__(6208);
+
+/**
+ * gcov / llvm-cov 覆盖率报告解析器。
+ *
+ * 支持两种格式：
+ * 1. lcov 格式（gcov 经 geninfo 生成、llvm-cov --format=lcov、cargo-llvm-cov --lcov）：
+ *    SF:<file>
+ *    FNF:<functions found> / FNH:<functions hit>
+ *    BRF:<branches found> / BRH:<branches hit>
+ *    LF:<lines found> / LH:<lines hit>
+ *    end_of_record
+ * 2. 纯 .gcov 文本（gcov 直接输出，每文件一个）：
+ *            1:    5:    int foo() {     ← 已覆盖（计数 > 0）
+ *         #####:    6:    bar();          ← 未覆盖
+ *            -:    7:    }
+ */
+
+const GCOV_LINE_RE = /^\s*(?:(\d+)|#####|=====):\s*(\d+):/;
+
+/** 解析 lcov 内容，返回统一中间结构 */
+function parseLcovContent(content) {
+  const records = [];
+  let current = null;
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (line === 'end_of_record') {
+      if (current) {
+        records.push(current);
+        current = null;
+      }
+      continue;
+    }
+    if (!current) current = {};
+    const idx = line.indexOf(':');
+    if (idx < 0) continue;
+    const key = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1).trim();
+    current[key] = value;
+  }
+  if (current) records.push(current);
+
+  const files = [];
+  let agg = { line: { covered: 0, total: 0 }, branch: { covered: 0, total: 0 }, method: { covered: 0, total: 0 } };
+
+  for (const rec of records) {
+    if (!rec.SF) continue;
+    const item = { filePath: rec.SF };
+    if (rec.LF != null && rec.LH != null) {
+      const total = Number(rec.LF);
+      const covered = Number(rec.LH);
+      item.lineCoverage = pct(covered, total);
+      item.lineCovered = covered;
+      item.lineTotal = total;
+      agg.line.covered += covered;
+      agg.line.total += total;
+    }
+    if (rec.BRF != null && rec.BRH != null) {
+      const total = Number(rec.BRF);
+      const covered = Number(rec.BRH);
+      if (total > 0) {
+        item.branchCoverage = pct(covered, total);
+        item.branchCovered = covered;
+        item.branchTotal = total;
+        agg.branch.covered += covered;
+        agg.branch.total += total;
+      }
+    }
+    if (rec.FNF != null && rec.FNH != null) {
+      const total = Number(rec.FNF);
+      const covered = Number(rec.FNH);
+      if (total > 0) {
+        item.methodCoverage = pct(covered, total);
+        item.methodCovered = covered;
+        item.methodTotal = total;
+        agg.method.covered += covered;
+        agg.method.total += total;
+      }
+    }
+    if (item.lineTotal) files.push(item);
+  }
+
+  const metrics = { lineCoverage: pct(agg.line.covered, agg.line.total), lineCovered: agg.line.covered, lineTotal: agg.line.total };
+  for (const type of ['branch', 'method']) {
+    if (agg[type].total > 0) {
+      metrics[`${type}Coverage`] = pct(agg[type].covered, agg[type].total);
+      metrics[`${type}Covered`] = agg[type].covered;
+      metrics[`${type}Total`] = agg[type].total;
+    }
+  }
+
+  return { tool: 'gcov', metrics, files };
+}
+
+/** 解析单个纯 .gcov 文本文件（对应一个源码文件） */
+function parseGcovTextContent(content, fileName) {
+  let covered = 0;
+  let total = 0;
+  for (const line of content.split(/\r?\n/)) {
+    const m = GCOV_LINE_RE.exec(line);
+    if (!m) continue;
+    total += 1;
+    if (m[1] && parseInt(m[1], 10) > 0) covered += 1;
+  }
+  const filePath = fileName.replace(/\.gcov$/i, '');
+  const item = {
+    filePath,
+    lineCoverage: pct(covered, total),
+    lineCovered: covered,
+    lineTotal: total,
+  };
+  return {
+    tool: 'gcov',
+    metrics: { lineCoverage: pct(covered, total), lineCovered: covered, lineTotal: total },
+    files: [item],
+  };
+}
+
+/** 按文件内容自动识别 lcov 还是纯 gcov 文本 */
+function isLcovContent(content) {
+  return /^\s*SF:/m.test(content);
+}
+
+function parseFile(file) {
+  const content = fs.readFileSync(file, 'utf-8');
+  return isLcovContent(content)
+    ? parseLcovContent(content)
+    : parseGcovTextContent(content, path.basename(file));
+}
+
+module.exports = { parseFile, parseLcovContent, parseGcovTextContent, isLcovContent };
+
+
+/***/ }),
+
+/***/ 3354:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+const fs = __nccwpck_require__(9896);
+const { pct } = __nccwpck_require__(6208);
+
+/**
+ * Go test 覆盖率报告解析器（go test -coverprofile 输出，如 coverage.out）。
+ *
+ * 结构：
+ * mode: count
+ * openlibing/foo/bar.go:10.13,12.2 1 1
+ * openlibing/foo/bar.go:15.2,20.8 1 1
+ * openlibing/foo/baz.go:3.2,4.8 1 0
+ *
+ * 每行 = 一个语句块：file:startLine.startCol,endLine.endCol numStmts count。
+ * count>0 表示该块被执行过。行覆盖率按语句块近似（covered 块数 / 总块数），
+ * 与 go test 输出的 "xx.x% of statements" 语义一致。go 不产出 branch/method/class，缺省。
+ */
+
+const BLOCK_RE = /^(.+?):(\d+)\.\d+,(\d+)\.\d+\s+\d+\s+(\d+)$/;
+
+function parseContent(content) {
+  const perFile = new Map(); // filePath -> { covered, total }
+
+  const lines = content.split(/\r?\n/);
+  for (const line of lines) {
+    if (!line || line.startsWith('mode:')) continue;
+    const m = BLOCK_RE.exec(line);
+    if (!m) continue;
+    const filePath = m[1];
+    const count = parseInt(m[4], 10);
+    let rec = perFile.get(filePath);
+    if (!rec) {
+      rec = { covered: 0, total: 0 };
+      perFile.set(filePath, rec);
+    }
+    rec.total += 1;
+    if (count > 0) rec.covered += 1;
+  }
+
+  const files = [];
+  let aggCovered = 0;
+  let aggTotal = 0;
+  for (const [filePath, rec] of perFile.entries()) {
+    files.push({
+      filePath,
+      lineCoverage: pct(rec.covered, rec.total),
+      lineCovered: rec.covered,
+      lineTotal: rec.total,
+    });
+    aggCovered += rec.covered;
+    aggTotal += rec.total;
+  }
+
+  return {
+    tool: 'go-test',
+    metrics: { lineCoverage: pct(aggCovered, aggTotal), lineCovered: aggCovered, lineTotal: aggTotal },
+    files,
+  };
+}
+
+function parseFile(file) {
+  const content = fs.readFileSync(file, 'utf-8');
+  // 单文件模式（go test -coverprofile 单输出）：直接用文件名作为相对路径基准
+  const parsed = parseContent(content);
+  // 若 go 输出了机器绝对路径，统一只取相对路径（后续 normalize 再处理）
+  return parsed;
+}
+
+module.exports = { parseFile, parseContent };
+
+
+/***/ }),
+
+/***/ 4577:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+const fs = __nccwpck_require__(9896);
+const { pct } = __nccwpck_require__(6208);
+
+/**
+ * Jacoco 报告解析器（jacoco.xml）。
+ *
+ * jacoco.xml 结构（关键部分）：
+ * <report>
+ *   <package name="com/foo">
+ *     <class name="com/foo/Bar" sourcefilename="Bar.java">...</class>
+ *     <sourcefile name="Bar.java">
+ *       <line nr="10" mi="0" ci="5" mb="0" cb="2"/>
+ *       <counter type="LINE" missed=".." covered=".."/>
+ *       <counter type="BRANCH" missed=".." covered=".."/>
+ *       <counter type="METHOD" missed=".." covered=".."/>
+ *       <counter type="CLASS" missed=".." covered=".."/>
+ *     </sourcefile>
+ *   </package>
+ * </report>
+ *
+ * 文件明细取自 <sourcefile>（已按源码文件聚合），文件路径 = package.name + '/' + sourcefile.name；
+ * 总体指标对所有 sourcefile 的 counter 求和（等于 report 级 totals）。
+ */
+
+/** 从 XML 片段中解析 <counter type="X" missed="n" covered="n"/> 列表 */
+function parseCounters(block) {
+  const counters = {};
+  const re = /<counter\s+type="(\w+)"\s+missed="(\d+)"\s+covered="(\d+)"\s*\/>/g;
+  let m;
+  while ((m = re.exec(block)) !== null) {
+    counters[m[1].toLowerCase()] = {
+      missed: parseInt(m[2], 10),
+      covered: parseInt(m[3], 10),
+    };
+  }
+  return counters;
+}
+
+/** 由 counter 集合构建统一文件条目；无 LINE 计数（空源码文件）返回 null */
+function buildFileItem(filePath, counters) {
+  const line = counters.line;
+  if (!line) return null;
+  const item = { filePath };
+  const lineTotal = line.covered + line.missed;
+  item.lineCoverage = pct(line.covered, lineTotal);
+  item.lineCovered = line.covered;
+  item.lineTotal = lineTotal;
+  for (const type of ['branch', 'method', 'class']) {
+    const c = counters[type];
+    if (c) {
+      const total = c.covered + c.missed;
+      if (total > 0) {
+        item[`${type}Coverage`] = pct(c.covered, total);
+        item[`${type}Covered`] = c.covered;
+        item[`${type}Total`] = total;
+      }
+    }
+  }
+  return item;
+}
+
+/** 解析 jacoco.xml 内容，返回统一中间结构 */
+function parseContent(xml) {
+  const agg = { line: { covered: 0, total: 0 }, branch: { covered: 0, total: 0 }, method: { covered: 0, total: 0 }, class: { covered: 0, total: 0 } };
+  const files = [];
+
+  const pkgRe = /<package\s+name="([^"]*)">([\s\S]*?)<\/package>/g;
+  let pm;
+  while ((pm = pkgRe.exec(xml)) !== null) {
+    const pkgName = pm[1];
+    const pkgBlock = pm[2];
+    const sfRe = /<sourcefile\s+name="([^"]*)">([\s\S]*?)<\/sourcefile>/g;
+    let sm;
+    while ((sm = sfRe.exec(pkgBlock)) !== null) {
+      const counters = parseCounters(sm[2]);
+      const filePath = (pkgName ? pkgName + '/' : '') + sm[1];
+      const item = buildFileItem(filePath, counters);
+      if (item) files.push(item);
+      for (const type of ['line', 'branch', 'method', 'class']) {
+        const c = counters[type];
+        if (c) {
+          agg[type].covered += c.covered;
+          agg[type].total += c.covered + c.missed;
+        }
+      }
+    }
+  }
+
+  const metrics = { lineCoverage: pct(agg.line.covered, agg.line.total), lineCovered: agg.line.covered, lineTotal: agg.line.total };
+  for (const type of ['branch', 'method', 'class']) {
+    if (agg[type].total > 0) {
+      metrics[`${type}Coverage`] = pct(agg[type].covered, agg[type].total);
+      metrics[`${type}Covered`] = agg[type].covered;
+      metrics[`${type}Total`] = agg[type].total;
+    }
+  }
+
+  return { tool: 'jacoco', metrics, files };
+}
+
+function parseFile(file) {
+  return parseContent(fs.readFileSync(file, 'utf-8'));
+}
+
+module.exports = { parseFile, parseContent, parseCounters, buildFileItem };
+
+
+/***/ }),
+
+/***/ 8727:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+const fs = __nccwpck_require__(9896);
+const path = __nccwpck_require__(6928);
+
+/**
+ * 覆盖率报告扫描器：按扩展名优先识别，再对歧义 JSON（coverage.json 等）做内容嗅探。
+ *
+ * 识别规则（优先级从高到低）：
+ * - jacoco.xml            → jacoco
+ * - coverage-final.json   → c8
+ * - coverage*.out         → go-test
+ * - .lcov / .info         → lcov（GcovParser 的 lcov 分支）
+ * - .gcov                 → gcov 文本（GcovParser 的 gcov 分支）
+ * - coverage.json 等 .json → 内容嗅探：llvm-cov export（data 数组）→ cargo-llvm-cov；
+ *                            coverage.py（meta/files/totals）→ coverage-py；c8（statementMap）→ c8
+ */
+
+/** 读取 JSON 内容（失败返回 null） */
+function readJson(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf-8'));
+  } catch (e) {
+    return null;
+  }
+}
+
+/** 内容嗅探 JSON 报告类型 */
+function sniffJson(json) {
+  if (!json || typeof json !== 'object') return null;
+  // llvm-cov export：顶层 data 数组，且首个元素含 files
+  if (Array.isArray(json.data) && json.data[0] && Array.isArray(json.data[0].files)) {
+    return 'cargo-llvm-cov';
+  }
+  // coverage.py：meta / totals + files（对象）
+  if ((json.meta || json.totals) && json.files && typeof json.files === 'object') {
+    return 'coverage-py';
+  }
+  // c8 coverage-final：值为 statementMap 对象
+  const values = Object.values(json);
+  if (values.some((v) => v && typeof v === 'object' && v.statementMap)) {
+    return 'c8';
+  }
+  return null;
+}
+
+/** 按文件路径识别工具；无法确定返回 null */
+function detectByPath(file) {
+  const name = path.basename(file).toLowerCase();
+  if (/jacoco\.xml$/i.test(name)) return 'jacoco';
+  if (/coverage-final\.json$/i.test(name)) return 'c8';
+  if (/^coverage[\w.-]*\.(out|cov|txt)$/i.test(name)) return 'go-test';
+  if (/\.(lcov|info)$/i.test(name)) return 'lcov';
+  if (/\.gcov$/i.test(name)) return 'gcov';
+  if (/\.json$/i.test(name)) {
+    const sniffed = sniffJson(readJson(file));
+    if (sniffed) return sniffed;
+    // 兜底：coverage.json 无法识别时按 coverage.py 处理（最常见）
+    if (/coverage\.json$/i.test(name)) return 'coverage-py';
+    return null;
+  }
+  return null;
+}
+
+/** 递归扫描目录，返回文件路径列表 */
+function walkDir(dir, out) {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (e) {
+    return out;
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      walkDir(full, out);
+    } else if (entry.isFile()) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
+/**
+ * 扫描输入路径（逗号分隔：文件或目录），返回识别出的报告列表。
+ * @param {string[]} inputs 用户输入路径列表
+ * @returns {{file: string, tool: string}[]}
+ */
+function scan(inputs) {
+  const reports = [];
+  for (const raw of inputs) {
+    const p = raw.trim();
+    if (!p) continue;
+    let abs = p;
+    if (!fs.existsSync(abs)) {
+      const workspace = process.env.WORKSPACE || process.cwd();
+      const joined = path.join(workspace, p);
+      if (fs.existsSync(joined)) abs = joined;
+    }
+    if (!fs.existsSync(abs)) {
+      console.log(`[WARN] 报告路径不存在，跳过: ${p}`);
+      continue;
+    }
+    const stat = fs.statSync(abs);
+    const files = stat.isDirectory() ? walkDir(abs, []) : [abs];
+    for (const file of files) {
+      const tool = detectByPath(file);
+      if (tool) {
+        reports.push({ file, tool });
+      }
+    }
+  }
+  // 去重（同一文件被多次输入命中）
+  const seen = new Set();
+  return reports.filter((r) => {
+    const key = r.file + '|' + r.tool;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+module.exports = { scan, detectByPath, sniffJson, walkDir };
+
+
+/***/ }),
+
+/***/ 6208:
+/***/ ((module) => {
+
+"use strict";
+
+
+/**
+ * 覆盖率通用工具：百分比计算（保留 2 位小数）。
+ */
+
+/** 四舍五入到 2 位小数 */
+function round2(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return null;
+  return Math.round(n * 100) / 100;
+}
+
+/**
+ * 覆盖率百分比：covered / total * 100，保留 2 位小数。
+ * total 为 0 或非法时返回 null（表示该指标不可用，调用方按缺省处理）。
+ */
+function pct(covered, total) {
+  const c = Number(covered);
+  const t = Number(total);
+  if (!Number.isFinite(c) || !Number.isFinite(t) || t <= 0) return null;
+  return round2((c / t) * 100);
+}
+
+/** 把字符串解析为数字；非法返回 null */
+function toNum(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+module.exports = { round2, pct, toNum };
+
+
+/***/ }),
+
+/***/ 6799:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+/**
+ * 最小 fetch polyfill（基于 Node 内置 http/https，零第三方依赖）。
+ *
+ * 背景：GitCode 插件 runtime 为 node16（action.yml runs.using: node16），无全局 fetch。
+ * @openlibing/huaweicloud-oidc-client 的 http.js 在全局 fetch 缺失时回退 require('undici')，
+ * 而 undici 未随 ncc 打包产物内联，会导致 "Cannot find module 'undici'"。
+ * 此处仅在全局 fetch 缺失时注入，覆盖 SDK sendRequest 的 POST APIG 上报（JSON body）。
+ * 不影响 node18+（已有全局 fetch）的环境。
+ */
+
+const http = __nccwpck_require__(8611);
+const https = __nccwpck_require__(5692);
+
+/** fetch 响应兼容对象：status / headers.forEach / text() */
+class PolyfillHeaders {
+  constructor(raw) {
+    this._raw = {};
+    for (const k of Object.keys(raw || {})) {
+      this._raw[k.toLowerCase()] = raw[k];
+    }
+  }
+  forEach(cb) {
+    for (const k of Object.keys(this._raw)) {
+      cb(this._raw[k], k);
+    }
+  }
+}
+
+function installFetchPolyfill() {
+  if (typeof globalThis.fetch === 'function') {
+    return; // node 18+ 已有全局 fetch，无需注入
+  }
+
+  globalThis.fetch = function fetchPolyfill(url, options) {
+    return new Promise((resolve, reject) => {
+      const urlObj = new URL(url);
+      const transport = urlObj.protocol === 'https:' ? https : http;
+      const method = (options && options.method) || 'GET';
+      const headers = Object.assign({}, options && options.headers);
+      const body = options && options.body;
+      if (body) {
+        headers['Content-Length'] = Buffer.byteLength(body);
+      }
+
+      const req = transport.request({
+        hostname: urlObj.hostname,
+        port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+        path: urlObj.pathname + urlObj.search,
+        method,
+        headers,
+        timeout: 30000
+      }, (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          const raw = Buffer.concat(chunks).toString('utf-8');
+          resolve({
+            status: res.statusCode,
+            headers: new PolyfillHeaders(res.headers),
+            text: () => Promise.resolve(raw)
+          });
+        });
+      });
+
+      req.on('error', (e) => reject(new Error(`${method} ${url}: ${e.message}`)));
+      req.on('timeout', () => req.destroy(new Error(`fetch polyfill timeout after 30000ms: ${method} ${url}`)));
+      if (body) {
+        req.write(body);
+      }
+      req.end();
+    });
+  };
+}
+
+module.exports = { installFetchPolyfill };
+
+
+/***/ }),
+
+/***/ 8702:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
@@ -231,10 +1521,10 @@ if (require.main === require.cache[eval('__filename')]) {
  * X-Security-Token 注入 -> 发送请求。需精细控制时可自行组合 V11Signer + sendRequest。
  */
 
-const { cfg } = __nccwpck_require__(7269);
-const { getCredentials } = __nccwpck_require__(6477);
-const { V11Signer } = __nccwpck_require__(9692);
-const { sendRequest } = __nccwpck_require__(5531);
+const { cfg } = __nccwpck_require__(89);
+const { getCredentials } = __nccwpck_require__(281);
+const { V11Signer } = __nccwpck_require__(9864);
+const { sendRequest } = __nccwpck_require__(2287);
 
 /**
  * 调用 APIG 接口：自动换证（带缓存）、V11 签名（自动携带 X-Security-Token）并发送请求。
@@ -274,7 +1564,7 @@ module.exports = { callApig };
 
 /***/ }),
 
-/***/ 7269:
+/***/ 89:
 /***/ ((module) => {
 
 "use strict";
@@ -336,7 +1626,7 @@ module.exports = { CONFIG, cfg, configure };
 
 /***/ }),
 
-/***/ 6477:
+/***/ 281:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
@@ -348,10 +1638,10 @@ module.exports = { CONFIG, cfg, configure };
  * -> 华为云 STS AssumeAgencyWithOIDC，带缓存自动刷新、force 强制刷新、并发去重。
  */
 
-const { cfg } = __nccwpck_require__(7269);
-const { info, debug, error, mask, maskBody } = __nccwpck_require__(9463);
-const { sendRequest } = __nccwpck_require__(5531);
-const { getOidcToken } = __nccwpck_require__(8790);
+const { cfg } = __nccwpck_require__(89);
+const { info, debug, error, mask, maskBody } = __nccwpck_require__(4787);
+const { sendRequest } = __nccwpck_require__(2287);
+const { getOidcToken } = __nccwpck_require__(7050);
 
 let _credentials = null; // { accessKeyId, secretAccessKey, securityToken, expiresAt, expiresAtISO }
 let _credentialPromise = null; // 进行中的换证 Promise（并发去重）
@@ -525,7 +1815,7 @@ module.exports = { getCredentials };
 
 /***/ }),
 
-/***/ 5531:
+/***/ 2287:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
@@ -537,7 +1827,7 @@ module.exports = { getCredentials };
  * 调试模式打印完整请求/响应日志（敏感字段自动脱敏），非调试模式不打印请求详情。
  */
 
-const { debug, maskHeaders, maskBody, clip } = __nccwpck_require__(9463);
+const { debug, maskHeaders, maskBody, clip } = __nccwpck_require__(4787);
 
 // Node 18+ 有内置全局 fetch；在只支持 node16 运行时的 CI 平台（如 GitCode Action）下
 // 回退到 undici（作为 Action 产物时由 @actions/core 的传递依赖随 ncc 一并内联）。
@@ -562,7 +1852,7 @@ async function sendRequest(method, url, headers, body) {
 
   let res;
   try {
-    const fetchImpl = typeof fetch === 'function' ? fetch : (...args) => (__nccwpck_require__(8337).fetch)(...args);
+    const fetchImpl = typeof fetch === 'function' ? fetch : (...args) => (__nccwpck_require__(566).fetch)(...args);
     res = await fetchImpl(url, {
       method,
       headers,
@@ -618,7 +1908,7 @@ module.exports = { sendRequest };
 
 /***/ }),
 
-/***/ 8620:
+/***/ 3987:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
@@ -685,17 +1975,17 @@ module.exports = { sendRequest };
  */
 
 module.exports = {
-  callApig: (__nccwpck_require__(578).callApig),
-  getCredentials: (__nccwpck_require__(6477).getCredentials),
-  configure: (__nccwpck_require__(7269).configure),
-  V11Signer: (__nccwpck_require__(9692).V11Signer),
-  sendRequest: (__nccwpck_require__(5531).sendRequest)
+  callApig: (__nccwpck_require__(8702).callApig),
+  getCredentials: (__nccwpck_require__(281).getCredentials),
+  configure: (__nccwpck_require__(89).configure),
+  V11Signer: (__nccwpck_require__(9864).V11Signer),
+  sendRequest: (__nccwpck_require__(2287).sendRequest)
 };
 
 
 /***/ }),
 
-/***/ 9463:
+/***/ 4787:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
@@ -706,7 +1996,7 @@ module.exports = {
  * 各级别日志均带 [INFO] / [DEBUG] / [ERROR] 前缀与 ISO 8601 UTC 时间戳，便于肉眼区分、排序与按级别检索。
  */
 
-const { cfg } = __nccwpck_require__(7269);
+const { cfg } = __nccwpck_require__(89);
 
 /** 当前时间戳（ISO 8601 UTC，如 2026-08-28T12:03:54.123Z）。 */
 function ts() {
@@ -799,7 +2089,7 @@ module.exports = { info, debug, error, mask, maskText, maskDeep, maskHeaders, ma
 
 /***/ }),
 
-/***/ 8790:
+/***/ 7050:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
@@ -812,9 +2102,9 @@ module.exports = { info, debug, error, mask, maskText, maskDeep, maskHeaders, ma
  * 环境变量申请（GitCode Actions 流水线与 GitHub Actions 运行器协议兼容）。
  */
 
-const { cfg } = __nccwpck_require__(7269);
-const { info, error } = __nccwpck_require__(9463);
-const { sendRequest } = __nccwpck_require__(5531);
+const { cfg } = __nccwpck_require__(89);
+const { info, error } = __nccwpck_require__(4787);
+const { sendRequest } = __nccwpck_require__(2287);
 
 /** 申请 OIDC ID Token（自包含，不依赖 @actions/core，GitHub / GitCode Actions 流水线均适用）。 */
 async function getOidcToken() {
@@ -867,7 +2157,7 @@ module.exports = { getOidcToken };
 
 /***/ }),
 
-/***/ 9692:
+/***/ 9864:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
@@ -1129,7 +2419,7 @@ module.exports = { V11Signer };
 
 /***/ }),
 
-/***/ 876:
+/***/ 2187:
 /***/ ((module) => {
 
 "use strict";
@@ -1366,7 +2656,7 @@ module.exports.ABSOLUTETIME_FORMAT = "hh:mm:ss.SSS";
 
 /***/ }),
 
-/***/ 6110:
+/***/ 5213:
 /***/ ((module, exports, __nccwpck_require__) => {
 
 /* eslint-env browser */
@@ -1626,7 +2916,7 @@ function localstorage() {
 	}
 }
 
-module.exports = __nccwpck_require__(897)(exports);
+module.exports = __nccwpck_require__(7564)(exports);
 
 const {formatters} = module.exports;
 
@@ -1645,7 +2935,7 @@ formatters.j = function (v) {
 
 /***/ }),
 
-/***/ 897:
+/***/ 7564:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 
@@ -1661,7 +2951,7 @@ function setup(env) {
 	createDebug.disable = disable;
 	createDebug.enable = enable;
 	createDebug.enabled = enabled;
-	createDebug.humanize = __nccwpck_require__(744);
+	createDebug.humanize = __nccwpck_require__(2170);
 	createDebug.destroy = destroy;
 
 	Object.keys(env).forEach(key => {
@@ -1944,7 +3234,7 @@ module.exports = setup;
 
 /***/ }),
 
-/***/ 2830:
+/***/ 8957:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 /**
@@ -1953,15 +3243,15 @@ module.exports = setup;
  */
 
 if (typeof process === 'undefined' || process.type === 'renderer' || process.browser === true || process.__nwjs) {
-	module.exports = __nccwpck_require__(6110);
+	module.exports = __nccwpck_require__(5213);
 } else {
-	module.exports = __nccwpck_require__(5108);
+	module.exports = __nccwpck_require__(1109);
 }
 
 
 /***/ }),
 
-/***/ 5108:
+/***/ 1109:
 /***/ ((module, exports, __nccwpck_require__) => {
 
 /**
@@ -1995,7 +3285,7 @@ exports.colors = [6, 2, 3, 4, 5, 1];
 try {
 	// Optional dependency (as in, doesn't need to be installed, NOT like optionalDependencies in package.json)
 	// eslint-disable-next-line import/no-extraneous-dependencies
-	const supportsColor = __nccwpck_require__(75);
+	const supportsColor = __nccwpck_require__(7960);
 
 	if (supportsColor && (supportsColor.stderr || supportsColor).level >= 2) {
 		exports.colors = [
@@ -2203,7 +3493,7 @@ function init(debug) {
 	}
 }
 
-module.exports = __nccwpck_require__(897)(exports);
+module.exports = __nccwpck_require__(7564)(exports);
 
 const {formatters} = module.exports;
 
@@ -2231,7 +3521,7 @@ formatters.O = function (v) {
 
 /***/ }),
 
-/***/ 8208:
+/***/ 7547:
 /***/ ((__unused_webpack_module, exports) => {
 
 /**
@@ -2341,7 +3631,7 @@ exports.InventoryFieldEncryptionStatus = 'EncryptionStatus';
 
 /***/ }),
 
-/***/ 9904:
+/***/ 6611:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 /**
@@ -2361,7 +3651,7 @@ exports.InventoryFieldEncryptionStatus = 'EncryptionStatus';
 
 const fs = __nccwpck_require__(9896);
 const path = __nccwpck_require__(6928);
-const log4js = __nccwpck_require__(892);
+const log4js = __nccwpck_require__(9595);
 
 function ensureDir(dir){
 	fs.mkdirSync(dir, {recursive: true});
@@ -2487,7 +3777,7 @@ module.exports = LogUtil;
 
 /***/ }),
 
-/***/ 1728:
+/***/ 3751:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 /**
@@ -2506,9 +3796,9 @@ module.exports = LogUtil;
  */
 
 const util = __nccwpck_require__(9023);
-const Utils = __nccwpck_require__(395);
-const LogUtil = __nccwpck_require__(9904);
-const enums = __nccwpck_require__(8208);
+const Utils = __nccwpck_require__(4920);
+const LogUtil = __nccwpck_require__(6611);
+const enums = __nccwpck_require__(7547);
 const {
 	MAX_UPLOAD_PART_COUNT,
 
@@ -4072,7 +5362,7 @@ module.exports = ObsClient;
 
 /***/ }),
 
-/***/ 8567:
+/***/ 1030:
 /***/ ((module) => {
 
 /**
@@ -9853,7 +11143,7 @@ module.exports = operations;
 
 /***/ }),
 
-/***/ 395:
+/***/ 4920:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 /**
@@ -9876,13 +11166,13 @@ const fs = __nccwpck_require__(9896);
 const events = __nccwpck_require__(4434);
 const httpLib = __nccwpck_require__(8611);
 const httpsLib = __nccwpck_require__(5692);
-const { XMLParser } = __nccwpck_require__(591)
+const { XMLParser } = __nccwpck_require__(9036)
 const urlLib = __nccwpck_require__(7016);
 const pathLib = __nccwpck_require__(6928);
 const streamLib = __nccwpck_require__(2203);
-const obsModel = __nccwpck_require__(8567);
-const v2Model = __nccwpck_require__(5755);
-const enums = __nccwpck_require__(8208);
+const obsModel = __nccwpck_require__(1030);
+const v2Model = __nccwpck_require__(5744);
+const enums = __nccwpck_require__(7547);
 const options = {
 	ignoreAttributes: true,
 	parseTagValue: false,
@@ -12703,7 +13993,7 @@ module.exports = Utils;
 
 /***/ }),
 
-/***/ 5755:
+/***/ 5744:
 /***/ ((module) => {
 
 /**
@@ -18089,17 +19379,17 @@ module.exports = operations;
 
 /***/ }),
 
-/***/ 3783:
+/***/ 9529:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const fs = __nccwpck_require__(5744)
+const fs = __nccwpck_require__(9772)
 const path = __nccwpck_require__(6928)
-const mkdirpSync = (__nccwpck_require__(1089).mkdirsSync)
-const utimesSync = (__nccwpck_require__(6934).utimesMillisSync)
-const stat = __nccwpck_require__(887)
+const mkdirpSync = (__nccwpck_require__(1201).mkdirsSync)
+const utimesSync = (__nccwpck_require__(9982).utimesMillisSync)
+const stat = __nccwpck_require__(4415)
 
 function copySync (src, dest, opts) {
   if (typeof opts === 'function') {
@@ -18172,7 +19462,7 @@ function copyFile (srcStat, src, dest, opts) {
 
 function copyFileFallback (srcStat, src, dest, opts) {
   const BUF_LENGTH = 64 * 1024
-  const _buff = __nccwpck_require__(9635)(BUF_LENGTH)
+  const _buff = __nccwpck_require__(7563)(BUF_LENGTH)
 
   const fdr = fs.openSync(src, 'r')
   const fdw = fs.openSync(dest, 'w', srcStat.mode)
@@ -18261,31 +19551,31 @@ module.exports = copySync
 
 /***/ }),
 
-/***/ 1364:
+/***/ 1438:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
 module.exports = {
-  copySync: __nccwpck_require__(3783)
+  copySync: __nccwpck_require__(9529)
 }
 
 
 /***/ }),
 
-/***/ 1759:
+/***/ 9779:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const fs = __nccwpck_require__(5744)
+const fs = __nccwpck_require__(9772)
 const path = __nccwpck_require__(6928)
-const mkdirp = (__nccwpck_require__(1089).mkdirs)
-const pathExists = (__nccwpck_require__(2881).pathExists)
-const utimes = (__nccwpck_require__(6934).utimesMillis)
-const stat = __nccwpck_require__(887)
+const mkdirp = (__nccwpck_require__(1201).mkdirs)
+const pathExists = (__nccwpck_require__(8927).pathExists)
+const utimes = (__nccwpck_require__(9982).utimesMillis)
+const stat = __nccwpck_require__(4415)
 
 function copy (src, dest, opts, cb) {
   if (typeof opts === 'function' && !cb) {
@@ -18494,31 +19784,31 @@ module.exports = copy
 
 /***/ }),
 
-/***/ 5796:
+/***/ 1059:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const u = (__nccwpck_require__(5077)/* .fromCallback */ .S)
+const u = (__nccwpck_require__(8367)/* .fromCallback */ .S)
 module.exports = {
-  copy: u(__nccwpck_require__(1759))
+  copy: u(__nccwpck_require__(9779))
 }
 
 
 /***/ }),
 
-/***/ 7882:
+/***/ 6296:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const u = (__nccwpck_require__(5077)/* .fromCallback */ .S)
-const fs = __nccwpck_require__(5744)
+const u = (__nccwpck_require__(8367)/* .fromCallback */ .S)
+const fs = __nccwpck_require__(9772)
 const path = __nccwpck_require__(6928)
-const mkdir = __nccwpck_require__(1089)
-const remove = __nccwpck_require__(6205)
+const mkdir = __nccwpck_require__(1201)
+const remove = __nccwpck_require__(5609)
 
 const emptyDir = u(function emptyDir (dir, callback) {
   callback = callback || function () {}
@@ -18564,17 +19854,17 @@ module.exports = {
 
 /***/ }),
 
-/***/ 3529:
+/***/ 5941:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const u = (__nccwpck_require__(5077)/* .fromCallback */ .S)
+const u = (__nccwpck_require__(8367)/* .fromCallback */ .S)
 const path = __nccwpck_require__(6928)
-const fs = __nccwpck_require__(5744)
-const mkdir = __nccwpck_require__(1089)
-const pathExists = (__nccwpck_require__(2881).pathExists)
+const fs = __nccwpck_require__(9772)
+const mkdir = __nccwpck_require__(1201)
+const pathExists = (__nccwpck_require__(8927).pathExists)
 
 function createFile (file, callback) {
   function makeFile () {
@@ -18621,15 +19911,15 @@ module.exports = {
 
 /***/ }),
 
-/***/ 5779:
+/***/ 1175:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const file = __nccwpck_require__(3529)
-const link = __nccwpck_require__(8751)
-const symlink = __nccwpck_require__(4896)
+const file = __nccwpck_require__(5941)
+const link = __nccwpck_require__(8323)
+const symlink = __nccwpck_require__(9588)
 
 module.exports = {
   // file
@@ -18652,17 +19942,17 @@ module.exports = {
 
 /***/ }),
 
-/***/ 8751:
+/***/ 8323:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const u = (__nccwpck_require__(5077)/* .fromCallback */ .S)
+const u = (__nccwpck_require__(8367)/* .fromCallback */ .S)
 const path = __nccwpck_require__(6928)
-const fs = __nccwpck_require__(5744)
-const mkdir = __nccwpck_require__(1089)
-const pathExists = (__nccwpck_require__(2881).pathExists)
+const fs = __nccwpck_require__(9772)
+const mkdir = __nccwpck_require__(1201)
+const pathExists = (__nccwpck_require__(8927).pathExists)
 
 function createLink (srcpath, dstpath, callback) {
   function makeLink (srcpath, dstpath) {
@@ -18721,15 +20011,15 @@ module.exports = {
 
 /***/ }),
 
-/***/ 3121:
+/***/ 3829:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
 const path = __nccwpck_require__(6928)
-const fs = __nccwpck_require__(5744)
-const pathExists = (__nccwpck_require__(2881).pathExists)
+const fs = __nccwpck_require__(9772)
+const pathExists = (__nccwpck_require__(8927).pathExists)
 
 /**
  * Function that returns two types of paths, one relative to symlink, and one
@@ -18828,13 +20118,13 @@ module.exports = {
 
 /***/ }),
 
-/***/ 7045:
+/***/ 4409:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const fs = __nccwpck_require__(5744)
+const fs = __nccwpck_require__(9772)
 
 function symlinkType (srcpath, type, callback) {
   callback = (typeof type === 'function') ? type : callback
@@ -18867,28 +20157,28 @@ module.exports = {
 
 /***/ }),
 
-/***/ 4896:
+/***/ 9588:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const u = (__nccwpck_require__(5077)/* .fromCallback */ .S)
+const u = (__nccwpck_require__(8367)/* .fromCallback */ .S)
 const path = __nccwpck_require__(6928)
-const fs = __nccwpck_require__(5744)
-const _mkdirs = __nccwpck_require__(1089)
+const fs = __nccwpck_require__(9772)
+const _mkdirs = __nccwpck_require__(1201)
 const mkdirs = _mkdirs.mkdirs
 const mkdirsSync = _mkdirs.mkdirsSync
 
-const _symlinkPaths = __nccwpck_require__(3121)
+const _symlinkPaths = __nccwpck_require__(3829)
 const symlinkPaths = _symlinkPaths.symlinkPaths
 const symlinkPathsSync = _symlinkPaths.symlinkPathsSync
 
-const _symlinkType = __nccwpck_require__(7045)
+const _symlinkType = __nccwpck_require__(4409)
 const symlinkType = _symlinkType.symlinkType
 const symlinkTypeSync = _symlinkType.symlinkTypeSync
 
-const pathExists = (__nccwpck_require__(2881).pathExists)
+const pathExists = (__nccwpck_require__(8927).pathExists)
 
 function createSymlink (srcpath, dstpath, type, callback) {
   callback = (typeof type === 'function') ? type : callback
@@ -18938,15 +20228,15 @@ module.exports = {
 
 /***/ }),
 
-/***/ 3506:
+/***/ 7190:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 "use strict";
 
 // This is adapted from https://github.com/normalize/mz
 // Copyright (c) 2014-2016 Jonathan Ong me@jongleberry.com and Contributors
-const u = (__nccwpck_require__(5077)/* .fromCallback */ .S)
-const fs = __nccwpck_require__(5744)
+const u = (__nccwpck_require__(8367)/* .fromCallback */ .S)
+const fs = __nccwpck_require__(9772)
 
 const api = [
   'access',
@@ -19055,7 +20345,7 @@ if (typeof fs.realpath.native === 'function') {
 
 /***/ }),
 
-/***/ 2136:
+/***/ 4917:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
@@ -19064,19 +20354,19 @@ if (typeof fs.realpath.native === 'function') {
 module.exports = Object.assign(
   {},
   // Export promiseified graceful-fs:
-  __nccwpck_require__(3506),
+  __nccwpck_require__(7190),
   // Export extra methods:
-  __nccwpck_require__(1364),
-  __nccwpck_require__(5796),
-  __nccwpck_require__(7882),
-  __nccwpck_require__(5779),
-  __nccwpck_require__(8471),
-  __nccwpck_require__(1089),
-  __nccwpck_require__(4252),
-  __nccwpck_require__(2076),
-  __nccwpck_require__(484),
-  __nccwpck_require__(2881),
-  __nccwpck_require__(6205)
+  __nccwpck_require__(1438),
+  __nccwpck_require__(1059),
+  __nccwpck_require__(6296),
+  __nccwpck_require__(1175),
+  __nccwpck_require__(1383),
+  __nccwpck_require__(1201),
+  __nccwpck_require__(206),
+  __nccwpck_require__(2128),
+  __nccwpck_require__(268),
+  __nccwpck_require__(8927),
+  __nccwpck_require__(5609)
 )
 
 // Export fs.promises as a getter property so that we don't trigger
@@ -19091,17 +20381,17 @@ if (Object.getOwnPropertyDescriptor(fs, 'promises')) {
 
 /***/ }),
 
-/***/ 8471:
+/***/ 1383:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const u = (__nccwpck_require__(5077)/* .fromCallback */ .S)
-const jsonFile = __nccwpck_require__(6239)
+const u = (__nccwpck_require__(8367)/* .fromCallback */ .S)
+const jsonFile = __nccwpck_require__(8879)
 
-jsonFile.outputJson = u(__nccwpck_require__(3753))
-jsonFile.outputJsonSync = __nccwpck_require__(425)
+jsonFile.outputJson = u(__nccwpck_require__(6809))
+jsonFile.outputJsonSync = __nccwpck_require__(4441)
 // aliases
 jsonFile.outputJSON = jsonFile.outputJson
 jsonFile.outputJSONSync = jsonFile.outputJsonSync
@@ -19115,14 +20405,14 @@ module.exports = jsonFile
 
 /***/ }),
 
-/***/ 6239:
+/***/ 8879:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const u = (__nccwpck_require__(5077)/* .fromCallback */ .S)
-const jsonFile = __nccwpck_require__(2064)
+const u = (__nccwpck_require__(8367)/* .fromCallback */ .S)
+const jsonFile = __nccwpck_require__(2862)
 
 module.exports = {
   // jsonfile exports
@@ -19135,16 +20425,16 @@ module.exports = {
 
 /***/ }),
 
-/***/ 425:
+/***/ 4441:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const fs = __nccwpck_require__(5744)
+const fs = __nccwpck_require__(9772)
 const path = __nccwpck_require__(6928)
-const mkdir = __nccwpck_require__(1089)
-const jsonFile = __nccwpck_require__(6239)
+const mkdir = __nccwpck_require__(1201)
+const jsonFile = __nccwpck_require__(8879)
 
 function outputJsonSync (file, data, options) {
   const dir = path.dirname(file)
@@ -19161,16 +20451,16 @@ module.exports = outputJsonSync
 
 /***/ }),
 
-/***/ 3753:
+/***/ 6809:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
 const path = __nccwpck_require__(6928)
-const mkdir = __nccwpck_require__(1089)
-const pathExists = (__nccwpck_require__(2881).pathExists)
-const jsonFile = __nccwpck_require__(6239)
+const mkdir = __nccwpck_require__(1201)
+const pathExists = (__nccwpck_require__(8927).pathExists)
+const jsonFile = __nccwpck_require__(8879)
 
 function outputJson (file, data, options, callback) {
   if (typeof options === 'function') {
@@ -19196,14 +20486,14 @@ module.exports = outputJson
 
 /***/ }),
 
-/***/ 1089:
+/***/ 1201:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
-const u = (__nccwpck_require__(5077)/* .fromCallback */ .S)
-const mkdirs = u(__nccwpck_require__(2009))
-const mkdirsSync = __nccwpck_require__(185)
+const u = (__nccwpck_require__(8367)/* .fromCallback */ .S)
+const mkdirs = u(__nccwpck_require__(4041))
+const mkdirsSync = __nccwpck_require__(5897)
 
 module.exports = {
   mkdirs,
@@ -19218,15 +20508,15 @@ module.exports = {
 
 /***/ }),
 
-/***/ 185:
+/***/ 5897:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const fs = __nccwpck_require__(5744)
+const fs = __nccwpck_require__(9772)
 const path = __nccwpck_require__(6928)
-const invalidWin32Path = (__nccwpck_require__(4766).invalidWin32Path)
+const invalidWin32Path = (__nccwpck_require__(9614).invalidWin32Path)
 
 const o777 = parseInt('0777', 8)
 
@@ -19280,15 +20570,15 @@ module.exports = mkdirsSync
 
 /***/ }),
 
-/***/ 2009:
+/***/ 4041:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const fs = __nccwpck_require__(5744)
+const fs = __nccwpck_require__(9772)
 const path = __nccwpck_require__(6928)
-const invalidWin32Path = (__nccwpck_require__(4766).invalidWin32Path)
+const invalidWin32Path = (__nccwpck_require__(9614).invalidWin32Path)
 
 const o777 = parseInt('0777', 8)
 
@@ -19351,7 +20641,7 @@ module.exports = mkdirs
 
 /***/ }),
 
-/***/ 4766:
+/***/ 9614:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
@@ -19384,31 +20674,31 @@ module.exports = {
 
 /***/ }),
 
-/***/ 4252:
+/***/ 206:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
 module.exports = {
-  moveSync: __nccwpck_require__(7183)
+  moveSync: __nccwpck_require__(9785)
 }
 
 
 /***/ }),
 
-/***/ 7183:
+/***/ 9785:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const fs = __nccwpck_require__(5744)
+const fs = __nccwpck_require__(9772)
 const path = __nccwpck_require__(6928)
-const copySync = (__nccwpck_require__(1364).copySync)
-const removeSync = (__nccwpck_require__(6205).removeSync)
-const mkdirpSync = (__nccwpck_require__(1089).mkdirpSync)
-const stat = __nccwpck_require__(887)
+const copySync = (__nccwpck_require__(1438).copySync)
+const removeSync = (__nccwpck_require__(5609).removeSync)
+const mkdirpSync = (__nccwpck_require__(1201).mkdirpSync)
+const stat = __nccwpck_require__(4415)
 
 function moveSync (src, dest, opts) {
   opts = opts || {}
@@ -19452,33 +20742,33 @@ module.exports = moveSync
 
 /***/ }),
 
-/***/ 2076:
+/***/ 2128:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const u = (__nccwpck_require__(5077)/* .fromCallback */ .S)
+const u = (__nccwpck_require__(8367)/* .fromCallback */ .S)
 module.exports = {
-  move: u(__nccwpck_require__(7751))
+  move: u(__nccwpck_require__(3579))
 }
 
 
 /***/ }),
 
-/***/ 7751:
+/***/ 3579:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const fs = __nccwpck_require__(5744)
+const fs = __nccwpck_require__(9772)
 const path = __nccwpck_require__(6928)
-const copy = (__nccwpck_require__(5796).copy)
-const remove = (__nccwpck_require__(6205).remove)
-const mkdirp = (__nccwpck_require__(1089).mkdirp)
-const pathExists = (__nccwpck_require__(2881).pathExists)
-const stat = __nccwpck_require__(887)
+const copy = (__nccwpck_require__(1059).copy)
+const remove = (__nccwpck_require__(5609).remove)
+const mkdirp = (__nccwpck_require__(1201).mkdirp)
+const pathExists = (__nccwpck_require__(8927).pathExists)
+const stat = __nccwpck_require__(4415)
 
 function move (src, dest, opts, cb) {
   if (typeof opts === 'function') {
@@ -19539,17 +20829,17 @@ module.exports = move
 
 /***/ }),
 
-/***/ 484:
+/***/ 268:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const u = (__nccwpck_require__(5077)/* .fromCallback */ .S)
-const fs = __nccwpck_require__(5744)
+const u = (__nccwpck_require__(8367)/* .fromCallback */ .S)
+const fs = __nccwpck_require__(9772)
 const path = __nccwpck_require__(6928)
-const mkdir = __nccwpck_require__(1089)
-const pathExists = (__nccwpck_require__(2881).pathExists)
+const mkdir = __nccwpck_require__(1201)
+const pathExists = (__nccwpck_require__(8927).pathExists)
 
 function outputFile (file, data, encoding, callback) {
   if (typeof encoding === 'function') {
@@ -19587,13 +20877,13 @@ module.exports = {
 
 /***/ }),
 
-/***/ 2881:
+/***/ 8927:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
-const u = (__nccwpck_require__(5077)/* .fromPromise */ .z)
-const fs = __nccwpck_require__(3506)
+const u = (__nccwpck_require__(8367)/* .fromPromise */ .z)
+const fs = __nccwpck_require__(7190)
 
 function pathExists (path) {
   return fs.access(path).then(() => true).catch(() => false)
@@ -19607,14 +20897,14 @@ module.exports = {
 
 /***/ }),
 
-/***/ 6205:
+/***/ 5609:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const u = (__nccwpck_require__(5077)/* .fromCallback */ .S)
-const rimraf = __nccwpck_require__(7864)
+const u = (__nccwpck_require__(8367)/* .fromCallback */ .S)
+const rimraf = __nccwpck_require__(5108)
 
 module.exports = {
   remove: u(rimraf),
@@ -19624,13 +20914,13 @@ module.exports = {
 
 /***/ }),
 
-/***/ 7864:
+/***/ 5108:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const fs = __nccwpck_require__(5744)
+const fs = __nccwpck_require__(9772)
 const path = __nccwpck_require__(6928)
 const assert = __nccwpck_require__(2613)
 
@@ -19946,7 +21236,7 @@ rimraf.sync = rimrafSync
 
 /***/ }),
 
-/***/ 9635:
+/***/ 7563:
 /***/ ((module) => {
 
 "use strict";
@@ -19966,13 +21256,13 @@ module.exports = function (size) {
 
 /***/ }),
 
-/***/ 887:
+/***/ 4415:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const fs = __nccwpck_require__(5744)
+const fs = __nccwpck_require__(9772)
 const path = __nccwpck_require__(6928)
 
 const NODE_VERSION_MAJOR_WITH_BIGINT = 10
@@ -20146,13 +21436,13 @@ module.exports = {
 
 /***/ }),
 
-/***/ 6934:
+/***/ 9982:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const fs = __nccwpck_require__(5744)
+const fs = __nccwpck_require__(9772)
 const os = __nccwpck_require__(857)
 const path = __nccwpck_require__(6928)
 
@@ -20233,7 +21523,7 @@ module.exports = {
 
 /***/ }),
 
-/***/ 3964:
+/***/ 3440:
 /***/ ((module) => {
 
 "use strict";
@@ -20264,13 +21554,13 @@ function clone (obj) {
 
 /***/ }),
 
-/***/ 5744:
+/***/ 9772:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 var fs = __nccwpck_require__(9896)
-var polyfills = __nccwpck_require__(3501)
-var legacy = __nccwpck_require__(2270)
-var clone = __nccwpck_require__(3964)
+var polyfills = __nccwpck_require__(3529)
+var legacy = __nccwpck_require__(6834)
+var clone = __nccwpck_require__(3440)
 
 var util = __nccwpck_require__(9023)
 
@@ -20719,7 +22009,7 @@ function retry () {
 
 /***/ }),
 
-/***/ 2270:
+/***/ 6834:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 var Stream = (__nccwpck_require__(2203).Stream)
@@ -20844,7 +22134,7 @@ function legacy (fs) {
 
 /***/ }),
 
-/***/ 3501:
+/***/ 3529:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 var constants = __nccwpck_require__(9140)
@@ -21206,12 +22496,12 @@ function patch (fs) {
 
 /***/ }),
 
-/***/ 2064:
+/***/ 2862:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 var _fs
 try {
-  _fs = __nccwpck_require__(5744)
+  _fs = __nccwpck_require__(9772)
 } catch (_) {
   _fs = __nccwpck_require__(9896)
 }
@@ -21347,14 +22637,14 @@ module.exports = jsonfile
 
 /***/ }),
 
-/***/ 2838:
+/***/ 3013:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 /* eslint max-classes-per-file: ["error", 2] */
 /* eslint no-underscore-dangle: ["error", { "allow": ["_getLocationKeys"] }] */
 
-const flatted = __nccwpck_require__(8686);
-const levels = __nccwpck_require__(1630);
+const flatted = __nccwpck_require__(2109);
+const levels = __nccwpck_require__(613);
 
 class SerDe {
   constructor() {
@@ -21511,7 +22801,7 @@ module.exports = LoggingEvent;
 
 /***/ }),
 
-/***/ 3556:
+/***/ 2342:
 /***/ ((module) => {
 
 function maxFileSizeUnitTransform(maxLogSize) {
@@ -21564,10 +22854,10 @@ module.exports.modifyConfig = (config) =>
 
 /***/ }),
 
-/***/ 8494:
+/***/ 6336:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const debug = __nccwpck_require__(2830)('log4js:categoryFilter');
+const debug = __nccwpck_require__(8957)('log4js:categoryFilter');
 
 function categoryFilter(excludes, appender) {
   if (typeof excludes === 'string') excludes = [excludes];
@@ -21590,7 +22880,7 @@ module.exports.configure = configure;
 
 /***/ }),
 
-/***/ 6571:
+/***/ 6821:
 /***/ ((module) => {
 
 // eslint-disable-next-line no-console
@@ -21615,10 +22905,10 @@ module.exports.configure = configure;
 
 /***/ }),
 
-/***/ 6614:
+/***/ 676:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const streams = __nccwpck_require__(248);
+const streams = __nccwpck_require__(8737);
 const os = __nccwpck_require__(857);
 
 const eol = os.EOL;
@@ -21698,12 +22988,12 @@ module.exports.configure = configure;
 
 /***/ }),
 
-/***/ 7602:
+/***/ 648:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const debug = __nccwpck_require__(2830)('log4js:file');
+const debug = __nccwpck_require__(8957)('log4js:file');
 const path = __nccwpck_require__(6928);
-const streams = __nccwpck_require__(248);
+const streams = __nccwpck_require__(8737);
 const os = __nccwpck_require__(857);
 
 const eol = os.EOL;
@@ -21859,10 +23149,10 @@ module.exports.configure = configure;
 
 /***/ }),
 
-/***/ 7673:
+/***/ 4131:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const debug = __nccwpck_require__(2830)('log4js:fileSync');
+const debug = __nccwpck_require__(8957)('log4js:fileSync');
 const path = __nccwpck_require__(6928);
 const fs = __nccwpck_require__(9896);
 const os = __nccwpck_require__(857);
@@ -22124,29 +23414,29 @@ module.exports.configure = configure;
 
 /***/ }),
 
-/***/ 3718:
+/***/ 5928:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 const path = __nccwpck_require__(6928);
-const debug = __nccwpck_require__(2830)('log4js:appenders');
-const configuration = __nccwpck_require__(8507);
-const clustering = __nccwpck_require__(455);
-const levels = __nccwpck_require__(1630);
-const layouts = __nccwpck_require__(6794);
-const adapters = __nccwpck_require__(3556);
+const debug = __nccwpck_require__(8957)('log4js:appenders');
+const configuration = __nccwpck_require__(6986);
+const clustering = __nccwpck_require__(9192);
+const levels = __nccwpck_require__(613);
+const layouts = __nccwpck_require__(3651);
+const adapters = __nccwpck_require__(2342);
 
 // pre-load the core appenders so that webpack can find them
 const coreAppenders = new Map();
-coreAppenders.set('console', __nccwpck_require__(6571));
-coreAppenders.set('stdout', __nccwpck_require__(9303));
-coreAppenders.set('stderr', __nccwpck_require__(8680));
-coreAppenders.set('logLevelFilter', __nccwpck_require__(2722));
-coreAppenders.set('categoryFilter', __nccwpck_require__(8494));
-coreAppenders.set('noLogFilter', __nccwpck_require__(8799));
-coreAppenders.set('file', __nccwpck_require__(7602));
-coreAppenders.set('dateFile', __nccwpck_require__(6614));
-coreAppenders.set('fileSync', __nccwpck_require__(7673));
-coreAppenders.set('tcp', __nccwpck_require__(1477));
+coreAppenders.set('console', __nccwpck_require__(6821));
+coreAppenders.set('stdout', __nccwpck_require__(3521));
+coreAppenders.set('stderr', __nccwpck_require__(4038));
+coreAppenders.set('logLevelFilter', __nccwpck_require__(2248));
+coreAppenders.set('categoryFilter', __nccwpck_require__(6336));
+coreAppenders.set('noLogFilter', __nccwpck_require__(3261));
+coreAppenders.set('file', __nccwpck_require__(648));
+coreAppenders.set('dateFile', __nccwpck_require__(676));
+coreAppenders.set('fileSync', __nccwpck_require__(4131));
+coreAppenders.set('tcp', __nccwpck_require__(5783));
 
 const appenders = new Map();
 
@@ -22313,7 +23603,7 @@ module.exports.init = init;
 
 /***/ }),
 
-/***/ 2722:
+/***/ 2248:
 /***/ ((module) => {
 
 function logLevelFilter(minLevelString, maxLevelString, appender, levels) {
@@ -22340,10 +23630,10 @@ module.exports.configure = configure;
 
 /***/ }),
 
-/***/ 8799:
+/***/ 3261:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const debug = __nccwpck_require__(2830)('log4js:noLogFilter');
+const debug = __nccwpck_require__(8957)('log4js:noLogFilter');
 
 /**
  * The function removes empty or null regexp from the array
@@ -22390,10 +23680,10 @@ module.exports.configure = configure;
 
 /***/ }),
 
-/***/ 1149:
+/***/ 1787:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const debug = __nccwpck_require__(2830)('log4js:recording');
+const debug = __nccwpck_require__(8957)('log4js:recording');
 
 const recordedEvents = [];
 
@@ -22426,7 +23716,7 @@ module.exports = {
 
 /***/ }),
 
-/***/ 8680:
+/***/ 4038:
 /***/ ((module) => {
 
 function stderrAppender(layout, timezoneOffset) {
@@ -22448,7 +23738,7 @@ module.exports.configure = configure;
 
 /***/ }),
 
-/***/ 9303:
+/***/ 3521:
 /***/ ((__unused_webpack_module, exports) => {
 
 function stdoutAppender(layout, timezoneOffset) {
@@ -22470,10 +23760,10 @@ exports.configure = configure;
 
 /***/ }),
 
-/***/ 1477:
+/***/ 5783:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const debug = __nccwpck_require__(2830)('log4js:tcp');
+const debug = __nccwpck_require__(8957)('log4js:tcp');
 const net = __nccwpck_require__(9278);
 
 function appender(config, layout) {
@@ -22569,13 +23859,13 @@ module.exports.configure = configure;
 
 /***/ }),
 
-/***/ 8185:
+/***/ 150:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const debug = __nccwpck_require__(2830)('log4js:categories');
-const configuration = __nccwpck_require__(8507);
-const levels = __nccwpck_require__(1630);
-const appenders = __nccwpck_require__(3718);
+const debug = __nccwpck_require__(8957)('log4js:categories');
+const configuration = __nccwpck_require__(6986);
+const levels = __nccwpck_require__(613);
+const appenders = __nccwpck_require__(5928);
 
 const categories = new Map();
 
@@ -22795,12 +24085,12 @@ module.exports = Object.assign(module.exports, {
 
 /***/ }),
 
-/***/ 455:
+/***/ 9192:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const debug = __nccwpck_require__(2830)('log4js:clustering');
-const LoggingEvent = __nccwpck_require__(2838);
-const configuration = __nccwpck_require__(8507);
+const debug = __nccwpck_require__(8957)('log4js:clustering');
+const LoggingEvent = __nccwpck_require__(3013);
+const configuration = __nccwpck_require__(6986);
 
 let disabled = false;
 let cluster = null;
@@ -22907,11 +24197,11 @@ module.exports = {
 
 /***/ }),
 
-/***/ 8507:
+/***/ 6986:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 const util = __nccwpck_require__(9023);
-const debug = __nccwpck_require__(2830)('log4js:configuration');
+const debug = __nccwpck_require__(8957)('log4js:configuration');
 
 const preProcessingListeners = [];
 const listeners = [];
@@ -22978,12 +24268,12 @@ module.exports = {
 
 /***/ }),
 
-/***/ 8256:
+/***/ 1519:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 /* eslint no-underscore-dangle: ["error", { "allow": ["__statusCode", "_remoteAddress", "__headers", "_logging"] }] */
 
-const levels = __nccwpck_require__(1630);
+const levels = __nccwpck_require__(613);
 
 const DEFAULT_FORMAT =
   ':remote-addr - -' +
@@ -23308,15 +24598,15 @@ module.exports = function getLogger(logger4js, options) {
 
 /***/ }),
 
-/***/ 6794:
+/***/ 3651:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const dateFormat = __nccwpck_require__(876);
+const dateFormat = __nccwpck_require__(2187);
 const os = __nccwpck_require__(857);
 const util = __nccwpck_require__(9023);
 const path = __nccwpck_require__(6928);
 const url = __nccwpck_require__(7016);
-const debug = __nccwpck_require__(2830)('log4js:layouts');
+const debug = __nccwpck_require__(8957)('log4js:layouts');
 
 const styles = {
   // styles
@@ -23801,10 +25091,10 @@ module.exports = {
 
 /***/ }),
 
-/***/ 1630:
+/***/ 613:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const configuration = __nccwpck_require__(8507);
+const configuration = __nccwpck_require__(6986);
 
 const validColours = [
   'white',
@@ -23963,7 +25253,7 @@ module.exports = Level;
 
 /***/ }),
 
-/***/ 892:
+/***/ 9595:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 /**
@@ -23986,18 +25276,18 @@ module.exports = Level;
  * @since 2005-05-20
  * Website: http://log4js.berlios.de
  */
-const debug = __nccwpck_require__(2830)('log4js:main');
+const debug = __nccwpck_require__(8957)('log4js:main');
 const fs = __nccwpck_require__(9896);
-const deepClone = __nccwpck_require__(8825)({ proto: true });
-const configuration = __nccwpck_require__(8507);
-const layouts = __nccwpck_require__(6794);
-const levels = __nccwpck_require__(1630);
-const appenders = __nccwpck_require__(3718);
-const categories = __nccwpck_require__(8185);
-const Logger = __nccwpck_require__(2949);
-const clustering = __nccwpck_require__(455);
-const connectLogger = __nccwpck_require__(8256);
-const recordingModule = __nccwpck_require__(1149);
+const deepClone = __nccwpck_require__(3375)({ proto: true });
+const configuration = __nccwpck_require__(6986);
+const layouts = __nccwpck_require__(3651);
+const levels = __nccwpck_require__(613);
+const appenders = __nccwpck_require__(5928);
+const categories = __nccwpck_require__(150);
+const Logger = __nccwpck_require__(8318);
+const clustering = __nccwpck_require__(9192);
+const connectLogger = __nccwpck_require__(1519);
+const recordingModule = __nccwpck_require__(1787);
 
 let enabled = false;
 
@@ -24156,17 +25446,17 @@ module.exports = log4js;
 
 /***/ }),
 
-/***/ 2949:
+/***/ 8318:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 /* eslint no-underscore-dangle: ["error", { "allow": ["_log"] }] */
 
-const debug = __nccwpck_require__(2830)('log4js:logger');
-const LoggingEvent = __nccwpck_require__(2838);
-const levels = __nccwpck_require__(1630);
-const clustering = __nccwpck_require__(455);
-const categories = __nccwpck_require__(8185);
-const configuration = __nccwpck_require__(8507);
+const debug = __nccwpck_require__(8957)('log4js:logger');
+const LoggingEvent = __nccwpck_require__(3013);
+const levels = __nccwpck_require__(613);
+const clustering = __nccwpck_require__(9192);
+const categories = __nccwpck_require__(150);
+const configuration = __nccwpck_require__(6986);
 
 const stackReg = /^(?:\s*)at (?:(.+) \()?(?:([^(]+?):(\d+):(\d+))\)?$/;
 /**
@@ -24408,7 +25698,7 @@ module.exports = Logger;
 
 /***/ }),
 
-/***/ 744:
+/***/ 2170:
 /***/ ((module) => {
 
 /**
@@ -24577,7 +25867,7 @@ function plural(ms, msAbs, n, name) {
 
 /***/ }),
 
-/***/ 8825:
+/***/ 3375:
 /***/ ((module) => {
 
 "use strict";
@@ -24783,10 +26073,10 @@ function rfdcCircles (opts) {
 
 /***/ }),
 
-/***/ 4431:
+/***/ 6818:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const RollingFileWriteStream = __nccwpck_require__(440);
+const RollingFileWriteStream = __nccwpck_require__(8179);
 
 // just to adapt the previous version
 class DateRollingFileStream extends RollingFileWriteStream {
@@ -24831,10 +26121,10 @@ module.exports = DateRollingFileStream;
 
 /***/ }),
 
-/***/ 1723:
+/***/ 7566:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const RollingFileWriteStream = __nccwpck_require__(440);
+const RollingFileWriteStream = __nccwpck_require__(8179);
 
 // just to adapt the previous version
 class RollingFileStream extends RollingFileWriteStream {
@@ -24867,19 +26157,19 @@ module.exports = RollingFileStream;
 
 /***/ }),
 
-/***/ 440:
+/***/ 8179:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const debug = __nccwpck_require__(2830)("streamroller:RollingFileWriteStream");
-const fs = __nccwpck_require__(2136);
+const debug = __nccwpck_require__(8957)("streamroller:RollingFileWriteStream");
+const fs = __nccwpck_require__(4917);
 const path = __nccwpck_require__(6928);
 const os = __nccwpck_require__(857);
-const newNow = __nccwpck_require__(9548);
-const format = __nccwpck_require__(876);
+const newNow = __nccwpck_require__(9429);
+const format = __nccwpck_require__(2187);
 const { Writable } = __nccwpck_require__(2203);
-const fileNameFormatter = __nccwpck_require__(4873);
-const fileNameParser = __nccwpck_require__(332);
-const moveAndMaybeCompressFile = __nccwpck_require__(8162);
+const fileNameFormatter = __nccwpck_require__(4832);
+const fileNameParser = __nccwpck_require__(9495);
+const moveAndMaybeCompressFile = __nccwpck_require__(3745);
 
 const deleteFiles = fileNames => {
   debug(`deleteFiles: files to delete: ${fileNames}`);
@@ -25212,10 +26502,10 @@ module.exports = RollingFileWriteStream;
 
 /***/ }),
 
-/***/ 4873:
+/***/ 4832:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const debug = __nccwpck_require__(2830)("streamroller:fileNameFormatter");
+const debug = __nccwpck_require__(8957)("streamroller:fileNameFormatter");
 const path = __nccwpck_require__(6928);
 const ZIP_EXT = ".gz";
 const DEFAULT_FILENAME_SEP = ".";
@@ -25258,12 +26548,12 @@ module.exports = ({
 
 /***/ }),
 
-/***/ 332:
+/***/ 9495:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const debug = __nccwpck_require__(2830)("streamroller:fileNameParser");
+const debug = __nccwpck_require__(8957)("streamroller:fileNameParser");
 const ZIP_EXT = ".gz";
-const format = __nccwpck_require__(876);
+const format = __nccwpck_require__(2187);
 const DEFAULT_FILENAME_SEP = ".";
 
 module.exports = ({ file, keepFileExt, pattern, fileNameSep }) => {
@@ -25361,23 +26651,23 @@ module.exports = ({ file, keepFileExt, pattern, fileNameSep }) => {
 
 /***/ }),
 
-/***/ 248:
+/***/ 8737:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 module.exports = {
-  RollingFileWriteStream: __nccwpck_require__(440),
-  RollingFileStream: __nccwpck_require__(1723),
-  DateRollingFileStream: __nccwpck_require__(4431)
+  RollingFileWriteStream: __nccwpck_require__(8179),
+  RollingFileStream: __nccwpck_require__(7566),
+  DateRollingFileStream: __nccwpck_require__(6818)
 };
 
 
 /***/ }),
 
-/***/ 8162:
+/***/ 3745:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const debug = __nccwpck_require__(2830)('streamroller:moveAndMaybeCompressFile');
-const fs = __nccwpck_require__(2136);
+const debug = __nccwpck_require__(8957)('streamroller:moveAndMaybeCompressFile');
+const fs = __nccwpck_require__(4917);
 const zlib = __nccwpck_require__(3106);
 
 const _parseOption = function(rawOptions){
@@ -25486,7 +26776,7 @@ module.exports = moveAndMaybeCompressFile;
 
 /***/ }),
 
-/***/ 9548:
+/***/ 9429:
 /***/ ((module) => {
 
 // allows us to inject a mock date in tests
@@ -25495,7 +26785,7 @@ module.exports = () => new Date();
 
 /***/ }),
 
-/***/ 5077:
+/***/ 8367:
 /***/ ((__unused_webpack_module, exports) => {
 
 "use strict";
@@ -25528,1278 +26818,7 @@ exports.z = function (fn) {
 
 /***/ }),
 
-/***/ 6640:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { pct } = __nccwpck_require__(7074);
-
-/**
- * 覆盖率标准 JSON 归一化器。
- *
- * 职责：
- * 1. 合并多个解析结果（同一代码仓可能产出多种工具报告，如 Java + JS 混合）：
- *    - 文件明细直接拼接；
- *    - 总体指标按 covered/total 重新求和（等价于报告级 totals 聚合）。
- * 2. 文件路径归一化：剥离仓库根前缀、file:// 前缀、前导 ./ 与 /，统一为仓库相对路径。
- * 3. 组装标准上报 JSON：仅保留行覆盖率 lineCoverage（唯一必填指标）。
- */
-
-/** 文件路径归一化：机器绝对路径 / file:// / ./ 前缀 → 仓库相对路径 */
-function normalizeFilePath(p, repoRoot) {
-  let fp = String(p == null ? '' : p).replace(/\\/g, '/');
-  if (fp.startsWith('file://')) fp = fp.slice('file://'.length);
-  if (repoRoot) {
-    const root = String(repoRoot).replace(/\\/g, '/').replace(/\/+$/, '');
-    if (fp.startsWith(root + '/')) fp = fp.slice(root.length + 1);
-  }
-  fp = fp.replace(/^\.\//, '').replace(/^\/+/, '');
-  return fp;
-}
-
-/** 过滤并归一化文件明细数组：剔除无行数据的条目，路径归一化，仅保留行覆盖率指标 */
-function buildFileDetails(files, repoRoot) {
-  const out = [];
-  const seen = new Map(); // 同路径去重（多报告合并时同文件只保留首个）
-  for (const f of files) {
-    const lineTotal = Number(f.lineTotal || 0);
-    if (!(lineTotal > 0)) continue;
-    const filePath = normalizeFilePath(f.filePath, repoRoot);
-    if (!filePath) continue;
-    if (seen.has(filePath)) continue;
-    seen.set(filePath, true);
-    out.push({
-      filePath,
-      lineCoverage: Number(f.lineCoverage),
-      lineCovered: Number(f.lineCovered || 0),
-      lineTotal,
-    });
-  }
-  return out;
-}
-
-/**
- * 合并解析结果并组装标准 JSON。
- * @param {Array} parsedList 各解析器返回的统一中间结构
- * @param {{gitUrl: string, branchName: string, pipelineRunId: string, commitId: string}} meta 上报元数据
- * @param {string} [repoRoot] 仓库根目录（用于文件路径归一化）
- * @returns {Object} 标准上报 JSON
- */
-function normalize(parsedList, meta, repoRoot) {
-  const agg = { line: { covered: 0, total: 0 } };
-  const allFiles = [];
-
-  for (const parsed of parsedList || []) {
-    if (!parsed || !parsed.metrics) continue;
-    const m = parsed.metrics;
-    if (m.lineTotal != null) {
-      agg.line.covered += Number(m.lineCovered || 0);
-      agg.line.total += Number(m.lineTotal);
-    }
-    if (Array.isArray(parsed.files)) {
-      allFiles.push(...parsed.files);
-    }
-  }
-
-  if (!(agg.line.total > 0)) {
-    throw new Error('未解析到有效的行覆盖率数据（lineCoverage 是唯一必填指标）');
-  }
-
-  const out = {
-    gitUrl: meta.gitUrl || '',
-    branchName: meta.branchName || '',
-    pipelineRunId: meta.pipelineRunId || '',
-    commitId: meta.commitId || '',
-    lineCoverage: pct(agg.line.covered, agg.line.total),
-  };
-
-  const fileDetails = buildFileDetails(allFiles, repoRoot);
-  out.fileDetails = fileDetails;
-  return out;
-}
-
-module.exports = { normalize, normalizeFilePath, buildFileDetails };
-
-
-/***/ }),
-
-/***/ 5140:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const fs = __nccwpck_require__(9896);
-const path = __nccwpck_require__(6928);
-const os = __nccwpck_require__(857);
-const crypto = __nccwpck_require__(6982);
-const ObsClient = __nccwpck_require__(1728);
-
-/**
- * OBS 上传 + APIG 回调（OIDC 免静态凭证）。
- *
- * 链路：OIDC ID Token 自申请 → 华为云 STS 换临时 AK/SK/SecurityToken →
- *       OBS putObject（public-read，后端匿名 HTTP GET 下载）→ APIG V11 签名回调。
- * OBS 上传与 APIG 回调均指数退避重试（默认 3 次）。
- */
-
-let V11Signer = null;
-let sendRequest = null;
-let getCredentials = null;
-let configure = null;
-try {
-  ({ V11Signer, sendRequest, getCredentials, configure } = __nccwpck_require__(8620));
-} catch (e) {
-  console.log('[ERROR] @openlibing/huaweicloud-oidc-client 加载失败，请重新构建 dist 后重试');
-}
-
-// ---------- 常量 ----------
-
-const APIG_SIGN_REGION = 'cn-southwest-2'; // APIG V11 签名区域
-const OIDC_API_PREFIX = '/action-api'; // OIDC 回调路径前缀（网关 IAM 认证）
-const CALLBACK_PATH = '/ut/coverage/report'; // coderepo UtCoverageController.reportUtCoverage
-// Ref issue #2：OIDC 业务 API 基址支持环境变量注入（OPENLIBING_APIG_PROD_BASE /
-// OPENLIBING_APIG_BETA_BASE），默认值仅为功能必需回退（公司 OpenLibing 平台
-// APIG 域名），已登记白名单作为合规例外，不得删除或替换
-const OIDC_PROD_BASE = process.env.OPENLIBING_APIG_PROD_BASE || 'https://apig.openlibing.com'; // gitleaks:allow 功能必需的业务 API 默认回退地址，运行时优先环境变量注入
-// beta.apig.openlibing.com 证书未绑定，临时使用已发布 /action-api 的 APIG 域名 // gitleaks:allow 功能必需的业务 API 默认回退地址（beta），运行时优先环境变量注入
-const OIDC_BETA_BASE = process.env.OPENLIBING_APIG_BETA_BASE || 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com';
-
-const OBS_BUCKET = 'openlibing-gitcode-action';
-const OBS_READ_ENDPOINT = 'https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com';
-const OBS_PREFIX = 'ut-coverage-action';
-const OBS_OBJECT_NAME = 'ut-coverage.json';
-
-// ---------- 通用辅助 ----------
-
-/** 同步指数退避重试：默认 3 次，失败后 sleep(2^(n-1) 秒) 再试 */
-function withRetrySync(fn, { retries = 3, label = '' } = {}) {
-  let lastErr;
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      return fn();
-    } catch (err) {
-      lastErr = err;
-      if (attempt === retries) break;
-      const delaySec = Math.pow(2, attempt - 1);
-      console.log(`[WARN] ${label} 第 ${attempt} 次失败（${err.message}），${delaySec}s 后重试（${attempt + 1}/${retries}）`);
-      const { execSync } = __nccwpck_require__(5317);
-      try {
-        execSync(`sleep ${delaySec}`, { shell: '/bin/bash' });
-      } catch (e) {
-        // sleep 命令不可用时兜底 JS 等待
-      }
-    }
-  }
-  throw lastErr;
-}
-
-/** 异步指数退避重试：默认 3 次，失败后延迟 2^(n-1) 秒再试 */
-async function withRetryAsync(fn, { retries = 3, label = '' } = {}) {
-  let lastErr;
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastErr = err;
-      if (attempt === retries) break;
-      const delayMs = Math.pow(2, attempt - 1) * 1000;
-      console.log(`[WARN] ${label} 第 ${attempt} 次失败（${err.message}），${delayMs}ms 后重试（${attempt + 1}/${retries}）`);
-      await new Promise((r) => setTimeout(r, delayMs));
-    }
-  }
-  throw lastErr;
-}
-
-/** 对象 Key 段清洗：仅保留字母数字与 . _ -，其余折叠为单连字符，空结果回退默认值 */
-function sanitizeKeySegment(value, fallback) {
-  const s = String(value || fallback)
-    .replace(/[^a-zA-Z0-9._-]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return s || fallback;
-}
-
-/** 构建 OBS 对象 Key：ut-coverage-action/{repoName}/{yyyyMMdd}.{HH}/{runId|manual}/ut-coverage.json */
-function buildObsKey(repoName, runId, date = new Date()) {
-  const name = sanitizeKeySegment(repoName, 'unknown-repo');
-  const rid = sanitizeKeySegment(runId, 'manual');
-  const dateStr = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}.${String(date.getHours()).padStart(2, '0')}`;
-  return `${OBS_PREFIX}/${name}/${dateStr}/${rid}/${OBS_OBJECT_NAME}`;
-}
-
-/** OIDC 换证：返回 { accessKeyId, secretAccessKey, securityToken } */
-async function getOidcCredentials() {
-  if (!getCredentials) throw new Error('@openlibing/huaweicloud-oidc-client 未加载，无法 OIDC 换证');
-  const cred = await getCredentials();
-  if (!cred || !cred.accessKeyId || !cred.secretAccessKey) {
-    throw new Error('OIDC 换证结果缺少 AK/SK');
-  }
-  return cred;
-}
-
-/** OBS 上传（ACL 可配置 + 指数退避重试），返回下载 URL */
-async function uploadJson(standardJson, key, cred, acl = 'public-read') {
-  if (!configure || !ObsClient) throw new Error('OBS SDK 未加载，无法上传');
-  const { region } = configure({});
-  const server = `https://obs.${region}.myhuaweicloud.com`;
-  // esdk-obs-nodejs initFactory 为 fire-and-forget，构造后让出一个微任务等待签名上下文初始化
-  const client = new ObsClient({
-    access_key_id: cred.accessKeyId,
-    secret_access_key: cred.secretAccessKey,
-    security_token: cred.securityToken,
-    server,
-    // esdk-obs-nodejs 默认关闭 TLS 证书校验（Ref #8/#14），显式恢复校验。
-    // SDK 构造参数键名为 ssl_verify（initFactory 读取 param.ssl_verify），
-    // 误写 sslVerify 会被忽略（上一轮整改回归缺陷，本处修正）
-    ssl_verify: true,
-  });
-  await Promise.resolve();
-
-  const tmpDir = os.tmpdir();
-  // 随机后缀避免可预测临时文件名（Ref #5）：同毫秒并发/共享 tmpdir 下不可被抢注或预读
-  const tmpFile = path.join(tmpDir, `ut-coverage-${Date.now()}-${crypto.randomUUID()}.json`);
-  fs.writeFileSync(tmpFile, JSON.stringify(standardJson, null, 2), 'utf-8');
-
-  try {
-    const assertOk = (result) => {
-      const msg = (result && result.CommonMsg) || {};
-      if (!(msg.Status >= 200 && msg.Status < 300)) {
-        throw new Error(`OBS 上传失败 (${msg.Status})${msg.Code ? ' [' + msg.Code + ']' : ''}: ${msg.Message || '未知错误'}`);
-      }
-    };
-    await withRetryAsync(
-      () => client.putObject({ Bucket: OBS_BUCKET, Key: key, SourceFile: tmpFile, ACL: acl }).then(assertOk),
-      { label: `OBS 上传 ${key}` }
-    );
-    return `${OBS_READ_ENDPOINT}/${key}`;
-  } finally {
-    try {
-      fs.unlinkSync(tmpFile);
-    } catch (e) {
-      // 临时文件清理失败不影响结果
-    }
-    await client.close();
-  }
-}
-
-/** APIG V11 签名回调（OIDC 临时凭证 + X-Security-Token），失败抛错供重试 */
-async function sendCallbackOidc(url, payload, cred) {
-  if (!V11Signer || !sendRequest) {
-    throw new Error('@openlibing/huaweicloud-oidc-client 未加载，无法进行 OIDC 回调');
-  }
-  const signer = new V11Signer({ region: APIG_SIGN_REGION });
-  signer.Key = cred.accessKeyId;
-  signer.Secret = cred.secretAccessKey;
-  const headers = { 'Content-Type': 'application/json' };
-  if (cred.securityToken) headers['X-Security-Token'] = cred.securityToken;
-
-  const body = JSON.stringify(payload);
-  const signedHeaders = signer.sign('POST', url, headers, body);
-  const res = await sendRequest('POST', url, signedHeaders, body);
-
-  const data = res.data;
-  if (res.status < 200 || res.status >= 300) {
-    throw new Error((data && (data.msg || data.message || data.error_msg)) || `HTTP ${res.status}`);
-  }
-  if (data && (data.code === 200 || data.code === 0)) {
-    return data;
-  }
-  throw new Error(`API 业务错误: code=${data && data.code}, msg=${data && (data.msg || data.message) || 'unknown'}`);
-}
-
-/**
- * 执行完整上报：换证 → 上传 OBS → 回调 APIG。
- * @param {Object} standardJson 标准上报 JSON
- * @param {{repoName: string, pipelineRunId: string, gitUrl: string, branchName: string}} opts
- * @param {{envType: string}} opts2 环境类型
- * @returns {Promise<{obsUrl: string}>}
- */
-async function uploadAndNotify(standardJson, opts, { envType = 'prod', obsAcl = 'public-read' } = {}) {
-  const isBeta = String(envType || 'prod').toLowerCase() === 'beta';
-  const callbackBase = isBeta ? OIDC_BETA_BASE : OIDC_PROD_BASE;
-
-  console.log(`[INFO] 认证模式: OIDC 联邦认证（SDK 自包含换证）`);
-  console.log(`[INFO] 回调地址: ${callbackBase}${OIDC_API_PREFIX}${CALLBACK_PATH}`);
-  console.log(`[INFO] OBS 对象 ACL: ${obsAcl}${obsAcl === 'public-read' ? '（默认；后端支持带凭证下载后建议切换 private）' : ''}`);
-
-  // 1. OIDC 换证
-  const cred = await getOidcCredentials();
-  console.log('[OK] 临时凭证获取成功（OIDC ID Token 自申请 + STS 换证）');
-
-  // 2. 上传 OBS
-  const key = buildObsKey(opts.repoName, opts.pipelineRunId);
-  console.log(`[INFO] OBS 路径: obs://${OBS_BUCKET}/${key}`);
-  const obsUrl = await uploadJson(standardJson, key, cred, obsAcl);
-  console.log(`[OK] OBS 上传成功: ${obsUrl}`);
-
-  // 3. 回调 APIG（回调失败不阻断：OBS 已上传，数据可后续补导入）
-  const callbackPayload = {
-    gitUrl: opts.gitUrl || '',
-    branchName: opts.branchName || '',
-    pipelineRunId: opts.pipelineRunId || '',
-    obsUrl,
-  };
-  const callbackUrl = `${callbackBase}${OIDC_API_PREFIX}${CALLBACK_PATH}`;
-  try {
-    const callbackResult = await withRetryAsync(
-      () => sendCallbackOidc(callbackUrl, callbackPayload, cred),
-      { label: 'APIG 回调' }
-    );
-    console.log(`[OK] 回调通知发送成功，回调时间: ${new Date().toISOString()}`);
-    console.log(`[INFO] 回调响应: ${JSON.stringify(callbackResult)}`);
-  } catch (err) {
-    console.log(`[WARN] 回调通知发送失败: ${err.message}`);
-    console.log('[INFO] OBS 上传已成功，回调失败不影响数据留存');
-  }
-
-  return { obsUrl };
-}
-
-module.exports = {
-  uploadAndNotify,
-  buildObsKey,
-  getOidcCredentials,
-  uploadJson,
-  sendCallbackOidc,
-  withRetrySync,
-  withRetryAsync,
-  OBS_BUCKET,
-  OBS_PREFIX,
-  OBS_READ_ENDPOINT,
-  CALLBACK_PATH,
-  OIDC_API_PREFIX,
-};
-
-
-/***/ }),
-
-/***/ 165:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const fs = __nccwpck_require__(9896);
-const { pct } = __nccwpck_require__(7074);
-
-/**
- * c8（V8 覆盖率）报告解析器（coverage-final.json）。
- *
- * 结构：顶层 key 为文件路径，value：
- * {
- *   "path": "...",
- *   "statementMap": {"0": {"start": {"line": 1, "column": 0}, ...}, ...},
- *   "fnMap": {"0": {"name": "...", "loc": {...}}, ...},
- *   "branchMap": {"0": {"type": "if", "locations": [...]}, ...},
- *   "s": {"0": 1, ...},      // 语句命中次数
- *   "f": {"0": 1, ...},      // 函数命中次数
- *   "b": {"0": [1, 0], ...}  // 分支命中次数数组
- * }
- *
- * 行覆盖率：按 statementMap 起始行去重，行上有任何已覆盖语句即视为已覆盖（与 istanbul 行覆盖语义一致）；
- * methodCoverage 取函数覆盖率；branchCoverage 取分支覆盖率。c8 不产出 class 覆盖率，缺省。
- */
-
-function parseFileObj(fileObj) {
-  const statementMap = fileObj.statementMap || {};
-  const s = fileObj.s || {};
-  const fnMap = fileObj.fnMap || {};
-  const f = fileObj.f || {};
-  const branchMap = fileObj.branchMap || {};
-  const b = fileObj.b || {};
-
-  // 行覆盖：语句起始行去重
-  const lines = new Map(); // line -> covered(boolean)
-  for (const [id, stmt] of Object.entries(statementMap)) {
-    const startLine = stmt && stmt.start && stmt.start.line;
-    if (startLine == null) continue;
-    const hit = Number(s[id] || 0) > 0;
-    lines.set(startLine, lines.get(startLine) || hit);
-  }
-  let lineCovered = 0;
-  for (const covered of lines.values()) {
-    if (covered) lineCovered += 1;
-  }
-  const lineTotal = lines.size;
-
-  const item = { filePath: fileObj.path };
-  if (lineTotal > 0) {
-    item.lineCoverage = pct(lineCovered, lineTotal);
-    item.lineCovered = lineCovered;
-    item.lineTotal = lineTotal;
-  }
-
-  // 方法覆盖率（函数）
-  let methodCovered = 0;
-  const methodTotal = Object.keys(fnMap).length;
-  for (const [id, count] of Object.entries(f)) {
-    if (Number(count || 0) > 0) methodCovered += 1;
-  }
-  if (methodTotal > 0) {
-    item.methodCoverage = pct(methodCovered, methodTotal);
-    item.methodCovered = methodCovered;
-    item.methodTotal = methodTotal;
-  }
-
-  // 分支覆盖率
-  let branchCovered = 0;
-  let branchTotal = 0;
-  for (const [id, counts] of Object.entries(b)) {
-    const arr = Array.isArray(counts) ? counts : [counts];
-    const targetCount = branchMap[id] && Array.isArray(branchMap[id].locations) ? branchMap[id].locations.length : arr.length;
-    branchTotal += targetCount > 0 ? targetCount : arr.length;
-    branchCovered += arr.filter((v) => Number(v || 0) > 0).length;
-  }
-  if (branchTotal > 0) {
-    item.branchCoverage = pct(branchCovered, branchTotal);
-    item.branchCovered = branchCovered;
-    item.branchTotal = branchTotal;
-  }
-
-  return item;
-}
-
-function parseContent(data) {
-  const files = [];
-  let agg = { line: { covered: 0, total: 0 }, branch: { covered: 0, total: 0 }, method: { covered: 0, total: 0 } };
-
-  for (const [filePath, value] of Object.entries(data)) {
-    if (!value || typeof value !== 'object' || !value.statementMap) continue;
-    const item = parseFileObj({ ...value, path: filePath });
-    if (!item.lineTotal) continue;
-    files.push(item);
-    agg.line.covered += item.lineCovered || 0;
-    agg.line.total += item.lineTotal || 0;
-    if (item.branchTotal) {
-      agg.branch.covered += item.branchCovered || 0;
-      agg.branch.total += item.branchTotal;
-    }
-    if (item.methodTotal) {
-      agg.method.covered += item.methodCovered || 0;
-      agg.method.total += item.methodTotal;
-    }
-  }
-
-  const metrics = { lineCoverage: pct(agg.line.covered, agg.line.total), lineCovered: agg.line.covered, lineTotal: agg.line.total };
-  for (const type of ['branch', 'method']) {
-    if (agg[type].total > 0) {
-      metrics[`${type}Coverage`] = pct(agg[type].covered, agg[type].total);
-      metrics[`${type}Covered`] = agg[type].covered;
-      metrics[`${type}Total`] = agg[type].total;
-    }
-  }
-
-  return { tool: 'c8', metrics, files };
-}
-
-function parseFile(file) {
-  return parseContent(JSON.parse(fs.readFileSync(file, 'utf-8')));
-}
-
-module.exports = { parseFile, parseContent, parseFileObj };
-
-
-/***/ }),
-
-/***/ 8445:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const fs = __nccwpck_require__(9896);
-const { pct } = __nccwpck_require__(7074);
-
-/**
- * llvm-cov export JSON 报告解析器（cargo-llvm-cov --json / llvm-cov export --format=json）。
- *
- * 结构：
- * {
- *   "data": [
- *     {
- *       "files": [
- *         {
- *           "filename": "src/lib.rs",
- *           "summary": {
- *             "lines":      {"count": 100, "covered": 80, "percent": 80.0},
- *             "functions":  {"count": 5, "covered": 4, "percent": 80.0},
- *             "branches":   {"count": 10, "covered": 6, "percent": 60.0},
- *             "regions":    {...},
- *             "instantiations": {...}
- *           }
- *         }
- *       ],
- *       "totals": { "lines": {...}, "functions": {...}, "branches": {...}, ... }
- *     }
- *   ]
- * }
- *
- * lineCoverage 取 lines 统计；methodCoverage 取 functions；branchCoverage 取 branches
- * （rust 某些 target 的 branches 可能为 null，此时该指标缺省）。class 覆盖率不适用，缺省。
- */
-
-const SUMMARY_KEYS = { lines: 'line', functions: 'method', branches: 'branch' };
-
-function buildItemFromSummary(filePath, summary) {
-  const s = summary || {};
-  const item = { filePath };
-  for (const [key, prefix] of Object.entries(SUMMARY_KEYS)) {
-    const stat = s[key];
-    if (!stat || stat.count == null || stat.covered == null) continue;
-    const total = Number(stat.count);
-    const covered = Number(stat.covered);
-    if (total <= 0) continue;
-    item[`${prefix}Coverage`] = pct(covered, total);
-    item[`${prefix}Covered`] = covered;
-    item[`${prefix}Total`] = total;
-  }
-  return item;
-}
-
-function parseContent(data) {
-  const d = data && Array.isArray(data.data) ? data.data[0] : null;
-  if (!d) {
-    throw new Error('无法解析 llvm-cov export JSON：缺少 data 数组');
-  }
-
-  const files = [];
-  let agg = { line: { covered: 0, total: 0 }, branch: { covered: 0, total: 0 }, method: { covered: 0, total: 0 } };
-
-  for (const f of d.files || []) {
-    const item = buildItemFromSummary(f.filename, f.summary);
-    if (!item.lineTotal) continue;
-    files.push(item);
-    for (const [key, prefix] of Object.entries(SUMMARY_KEYS)) {
-      const stat = f.summary && f.summary[key];
-      if (stat && stat.count != null && stat.covered != null) {
-        agg[prefix].covered += Number(stat.covered);
-        agg[prefix].total += Number(stat.count);
-      }
-    }
-  }
-
-  // 总体优先取 data[0].totals（与 files 求和一致）
-  const totals = d.totals || {};
-  const metrics = {};
-  if (totals.lines && totals.lines.count != null) {
-    metrics.lineCoverage = pct(totals.lines.covered, totals.lines.count);
-    metrics.lineCovered = Number(totals.lines.covered);
-    metrics.lineTotal = Number(totals.lines.count);
-  } else {
-    metrics.lineCoverage = pct(agg.line.covered, agg.line.total);
-    metrics.lineCovered = agg.line.covered;
-    metrics.lineTotal = agg.line.total;
-  }
-  for (const [key, prefix] of Object.entries(SUMMARY_KEYS)) {
-    if (prefix === 'line') continue;
-    const stat = totals[key];
-    if (stat && stat.count != null && Number(stat.count) > 0) {
-      metrics[`${prefix}Coverage`] = pct(stat.covered, stat.count);
-      metrics[`${prefix}Covered`] = Number(stat.covered);
-      metrics[`${prefix}Total`] = Number(stat.count);
-    } else if (agg[prefix].total > 0) {
-      metrics[`${prefix}Coverage`] = pct(agg[prefix].covered, agg[prefix].total);
-      metrics[`${prefix}Covered`] = agg[prefix].covered;
-      metrics[`${prefix}Total`] = agg[prefix].total;
-    }
-  }
-
-  return { tool: 'cargo-llvm-cov', metrics, files };
-}
-
-function parseFile(file) {
-  return parseContent(JSON.parse(fs.readFileSync(file, 'utf-8')));
-}
-
-module.exports = { parseFile, parseContent, buildItemFromSummary };
-
-
-/***/ }),
-
-/***/ 4007:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const fs = __nccwpck_require__(9896);
-const { pct } = __nccwpck_require__(7074);
-
-/**
- * coverage.py 覆盖率报告解析器（coverage.json）。
- *
- * 结构：
- * {
- *   "meta": {"format": 2, ...},
- *   "files": {
- *     "path/to/a.py": {
- *       "executed_lines": [...],
- *       "summary": {"covered_lines": 3, "num_statements": 5, "percent_covered": 60.0,
- *                   "missing_branches": 1, "branches": 2}
- *     }
- *   },
- *   "totals": {"covered_lines": 100, "num_statements": 200, "percent_covered": 50.0,
- *              "missing_branches": 3, "branches": 4}
- * }
- *
- * lineCoverage 由 percent_covered（totals）提供；branchCoverage = (branches - missing_branches) / branches。
- * coverage.py 不产出 method/class 覆盖率，缺省。
- */
-
-function buildFileItem(filePath, summary) {
-  const s = summary || {};
-  const item = { filePath };
-  let has = false;
-  if (s.num_statements != null && s.covered_lines != null) {
-    item.lineCoverage = pct(s.covered_lines, s.num_statements);
-    item.lineCovered = s.covered_lines;
-    item.lineTotal = s.num_statements;
-    has = true;
-  }
-  if (s.branches != null && Number(s.branches) > 0) {
-    const covered = Number(s.branches) - Number(s.missing_branches || 0);
-    item.branchCoverage = pct(covered, s.branches);
-    item.branchCovered = covered;
-    item.branchTotal = s.branches;
-  }
-  return has ? item : null;
-}
-
-function parseContent(data) {
-  const totals = data.totals || {};
-  const filesObj = data.files || {};
-  const files = [];
-
-  for (const [filePath, info] of Object.entries(filesObj)) {
-    if (!info || typeof info !== 'object') continue;
-    const item = buildFileItem(filePath, info.summary);
-    if (item && item.lineTotal) files.push(item);
-  }
-
-  const metrics = {};
-  if (totals.percent_covered != null) {
-    metrics.lineCoverage = pct(totals.percent_covered, 100);
-  } else if (totals.num_statements != null && totals.covered_lines != null) {
-    metrics.lineCoverage = pct(totals.covered_lines, totals.num_statements);
-  }
-  if (totals.num_statements != null) {
-    metrics.lineCovered = Number(totals.covered_lines != null ? totals.covered_lines : 0);
-    metrics.lineTotal = Number(totals.num_statements);
-  }
-  if (totals.branches != null && Number(totals.branches) > 0) {
-    const covered = Number(totals.branches) - Number(totals.missing_branches || 0);
-    metrics.branchCoverage = pct(covered, totals.branches);
-    metrics.branchCovered = covered;
-    metrics.branchTotal = Number(totals.branches);
-  }
-
-  return { tool: 'coverage-py', metrics, files };
-}
-
-function parseFile(file) {
-  return parseContent(JSON.parse(fs.readFileSync(file, 'utf-8')));
-}
-
-module.exports = { parseFile, parseContent, buildFileItem };
-
-
-/***/ }),
-
-/***/ 6985:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const fs = __nccwpck_require__(9896);
-const path = __nccwpck_require__(6928);
-const { pct } = __nccwpck_require__(7074);
-
-/**
- * gcov / llvm-cov 覆盖率报告解析器。
- *
- * 支持两种格式：
- * 1. lcov 格式（gcov 经 geninfo 生成、llvm-cov --format=lcov、cargo-llvm-cov --lcov）：
- *    SF:<file>
- *    FNF:<functions found> / FNH:<functions hit>
- *    BRF:<branches found> / BRH:<branches hit>
- *    LF:<lines found> / LH:<lines hit>
- *    end_of_record
- * 2. 纯 .gcov 文本（gcov 直接输出，每文件一个）：
- *            1:    5:    int foo() {     ← 已覆盖（计数 > 0）
- *         #####:    6:    bar();          ← 未覆盖
- *            -:    7:    }
- */
-
-const GCOV_LINE_RE = /^\s*(?:(\d+)|#####|=====):\s*(\d+):/;
-
-/** 解析 lcov 内容，返回统一中间结构 */
-function parseLcovContent(content) {
-  const records = [];
-  let current = null;
-
-  for (const rawLine of content.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line) continue;
-    if (line === 'end_of_record') {
-      if (current) {
-        records.push(current);
-        current = null;
-      }
-      continue;
-    }
-    if (!current) current = {};
-    const idx = line.indexOf(':');
-    if (idx < 0) continue;
-    const key = line.slice(0, idx).trim();
-    const value = line.slice(idx + 1).trim();
-    current[key] = value;
-  }
-  if (current) records.push(current);
-
-  const files = [];
-  let agg = { line: { covered: 0, total: 0 }, branch: { covered: 0, total: 0 }, method: { covered: 0, total: 0 } };
-
-  for (const rec of records) {
-    if (!rec.SF) continue;
-    const item = { filePath: rec.SF };
-    if (rec.LF != null && rec.LH != null) {
-      const total = Number(rec.LF);
-      const covered = Number(rec.LH);
-      item.lineCoverage = pct(covered, total);
-      item.lineCovered = covered;
-      item.lineTotal = total;
-      agg.line.covered += covered;
-      agg.line.total += total;
-    }
-    if (rec.BRF != null && rec.BRH != null) {
-      const total = Number(rec.BRF);
-      const covered = Number(rec.BRH);
-      if (total > 0) {
-        item.branchCoverage = pct(covered, total);
-        item.branchCovered = covered;
-        item.branchTotal = total;
-        agg.branch.covered += covered;
-        agg.branch.total += total;
-      }
-    }
-    if (rec.FNF != null && rec.FNH != null) {
-      const total = Number(rec.FNF);
-      const covered = Number(rec.FNH);
-      if (total > 0) {
-        item.methodCoverage = pct(covered, total);
-        item.methodCovered = covered;
-        item.methodTotal = total;
-        agg.method.covered += covered;
-        agg.method.total += total;
-      }
-    }
-    if (item.lineTotal) files.push(item);
-  }
-
-  const metrics = { lineCoverage: pct(agg.line.covered, agg.line.total), lineCovered: agg.line.covered, lineTotal: agg.line.total };
-  for (const type of ['branch', 'method']) {
-    if (agg[type].total > 0) {
-      metrics[`${type}Coverage`] = pct(agg[type].covered, agg[type].total);
-      metrics[`${type}Covered`] = agg[type].covered;
-      metrics[`${type}Total`] = agg[type].total;
-    }
-  }
-
-  return { tool: 'gcov', metrics, files };
-}
-
-/** 解析单个纯 .gcov 文本文件（对应一个源码文件） */
-function parseGcovTextContent(content, fileName) {
-  let covered = 0;
-  let total = 0;
-  for (const line of content.split(/\r?\n/)) {
-    const m = GCOV_LINE_RE.exec(line);
-    if (!m) continue;
-    total += 1;
-    if (m[1] && parseInt(m[1], 10) > 0) covered += 1;
-  }
-  const filePath = fileName.replace(/\.gcov$/i, '');
-  const item = {
-    filePath,
-    lineCoverage: pct(covered, total),
-    lineCovered: covered,
-    lineTotal: total,
-  };
-  return {
-    tool: 'gcov',
-    metrics: { lineCoverage: pct(covered, total), lineCovered: covered, lineTotal: total },
-    files: [item],
-  };
-}
-
-/** 按文件内容自动识别 lcov 还是纯 gcov 文本 */
-function isLcovContent(content) {
-  return /^\s*SF:/m.test(content);
-}
-
-function parseFile(file) {
-  const content = fs.readFileSync(file, 'utf-8');
-  return isLcovContent(content)
-    ? parseLcovContent(content)
-    : parseGcovTextContent(content, path.basename(file));
-}
-
-module.exports = { parseFile, parseLcovContent, parseGcovTextContent, isLcovContent };
-
-
-/***/ }),
-
-/***/ 9364:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const fs = __nccwpck_require__(9896);
-const { pct } = __nccwpck_require__(7074);
-
-/**
- * Go test 覆盖率报告解析器（go test -coverprofile 输出，如 coverage.out）。
- *
- * 结构：
- * mode: count
- * openlibing/foo/bar.go:10.13,12.2 1 1
- * openlibing/foo/bar.go:15.2,20.8 1 1
- * openlibing/foo/baz.go:3.2,4.8 1 0
- *
- * 每行 = 一个语句块：file:startLine.startCol,endLine.endCol numStmts count。
- * count>0 表示该块被执行过。行覆盖率按语句块近似（covered 块数 / 总块数），
- * 与 go test 输出的 "xx.x% of statements" 语义一致。go 不产出 branch/method/class，缺省。
- */
-
-const BLOCK_RE = /^(.+?):(\d+)\.\d+,(\d+)\.\d+\s+\d+\s+(\d+)$/;
-
-function parseContent(content) {
-  const perFile = new Map(); // filePath -> { covered, total }
-
-  const lines = content.split(/\r?\n/);
-  for (const line of lines) {
-    if (!line || line.startsWith('mode:')) continue;
-    const m = BLOCK_RE.exec(line);
-    if (!m) continue;
-    const filePath = m[1];
-    const count = parseInt(m[4], 10);
-    let rec = perFile.get(filePath);
-    if (!rec) {
-      rec = { covered: 0, total: 0 };
-      perFile.set(filePath, rec);
-    }
-    rec.total += 1;
-    if (count > 0) rec.covered += 1;
-  }
-
-  const files = [];
-  let aggCovered = 0;
-  let aggTotal = 0;
-  for (const [filePath, rec] of perFile.entries()) {
-    files.push({
-      filePath,
-      lineCoverage: pct(rec.covered, rec.total),
-      lineCovered: rec.covered,
-      lineTotal: rec.total,
-    });
-    aggCovered += rec.covered;
-    aggTotal += rec.total;
-  }
-
-  return {
-    tool: 'go-test',
-    metrics: { lineCoverage: pct(aggCovered, aggTotal), lineCovered: aggCovered, lineTotal: aggTotal },
-    files,
-  };
-}
-
-function parseFile(file) {
-  const content = fs.readFileSync(file, 'utf-8');
-  // 单文件模式（go test -coverprofile 单输出）：直接用文件名作为相对路径基准
-  const parsed = parseContent(content);
-  // 若 go 输出了机器绝对路径，统一只取相对路径（后续 normalize 再处理）
-  return parsed;
-}
-
-module.exports = { parseFile, parseContent };
-
-
-/***/ }),
-
-/***/ 5603:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const fs = __nccwpck_require__(9896);
-const { pct } = __nccwpck_require__(7074);
-
-/**
- * Jacoco 报告解析器（jacoco.xml）。
- *
- * jacoco.xml 结构（关键部分）：
- * <report>
- *   <package name="com/foo">
- *     <class name="com/foo/Bar" sourcefilename="Bar.java">...</class>
- *     <sourcefile name="Bar.java">
- *       <line nr="10" mi="0" ci="5" mb="0" cb="2"/>
- *       <counter type="LINE" missed=".." covered=".."/>
- *       <counter type="BRANCH" missed=".." covered=".."/>
- *       <counter type="METHOD" missed=".." covered=".."/>
- *       <counter type="CLASS" missed=".." covered=".."/>
- *     </sourcefile>
- *   </package>
- * </report>
- *
- * 文件明细取自 <sourcefile>（已按源码文件聚合），文件路径 = package.name + '/' + sourcefile.name；
- * 总体指标对所有 sourcefile 的 counter 求和（等于 report 级 totals）。
- */
-
-/** 从 XML 片段中解析 <counter type="X" missed="n" covered="n"/> 列表 */
-function parseCounters(block) {
-  const counters = {};
-  const re = /<counter\s+type="(\w+)"\s+missed="(\d+)"\s+covered="(\d+)"\s*\/>/g;
-  let m;
-  while ((m = re.exec(block)) !== null) {
-    counters[m[1].toLowerCase()] = {
-      missed: parseInt(m[2], 10),
-      covered: parseInt(m[3], 10),
-    };
-  }
-  return counters;
-}
-
-/** 由 counter 集合构建统一文件条目；无 LINE 计数（空源码文件）返回 null */
-function buildFileItem(filePath, counters) {
-  const line = counters.line;
-  if (!line) return null;
-  const item = { filePath };
-  const lineTotal = line.covered + line.missed;
-  item.lineCoverage = pct(line.covered, lineTotal);
-  item.lineCovered = line.covered;
-  item.lineTotal = lineTotal;
-  for (const type of ['branch', 'method', 'class']) {
-    const c = counters[type];
-    if (c) {
-      const total = c.covered + c.missed;
-      if (total > 0) {
-        item[`${type}Coverage`] = pct(c.covered, total);
-        item[`${type}Covered`] = c.covered;
-        item[`${type}Total`] = total;
-      }
-    }
-  }
-  return item;
-}
-
-/** 解析 jacoco.xml 内容，返回统一中间结构 */
-function parseContent(xml) {
-  const agg = { line: { covered: 0, total: 0 }, branch: { covered: 0, total: 0 }, method: { covered: 0, total: 0 }, class: { covered: 0, total: 0 } };
-  const files = [];
-
-  const pkgRe = /<package\s+name="([^"]*)">([\s\S]*?)<\/package>/g;
-  let pm;
-  while ((pm = pkgRe.exec(xml)) !== null) {
-    const pkgName = pm[1];
-    const pkgBlock = pm[2];
-    const sfRe = /<sourcefile\s+name="([^"]*)">([\s\S]*?)<\/sourcefile>/g;
-    let sm;
-    while ((sm = sfRe.exec(pkgBlock)) !== null) {
-      const counters = parseCounters(sm[2]);
-      const filePath = (pkgName ? pkgName + '/' : '') + sm[1];
-      const item = buildFileItem(filePath, counters);
-      if (item) files.push(item);
-      for (const type of ['line', 'branch', 'method', 'class']) {
-        const c = counters[type];
-        if (c) {
-          agg[type].covered += c.covered;
-          agg[type].total += c.covered + c.missed;
-        }
-      }
-    }
-  }
-
-  const metrics = { lineCoverage: pct(agg.line.covered, agg.line.total), lineCovered: agg.line.covered, lineTotal: agg.line.total };
-  for (const type of ['branch', 'method', 'class']) {
-    if (agg[type].total > 0) {
-      metrics[`${type}Coverage`] = pct(agg[type].covered, agg[type].total);
-      metrics[`${type}Covered`] = agg[type].covered;
-      metrics[`${type}Total`] = agg[type].total;
-    }
-  }
-
-  return { tool: 'jacoco', metrics, files };
-}
-
-function parseFile(file) {
-  return parseContent(fs.readFileSync(file, 'utf-8'));
-}
-
-module.exports = { parseFile, parseContent, parseCounters, buildFileItem };
-
-
-/***/ }),
-
-/***/ 1845:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const fs = __nccwpck_require__(9896);
-const path = __nccwpck_require__(6928);
-
-/**
- * 覆盖率报告扫描器：按扩展名优先识别，再对歧义 JSON（coverage.json 等）做内容嗅探。
- *
- * 识别规则（优先级从高到低）：
- * - jacoco.xml            → jacoco
- * - coverage-final.json   → c8
- * - coverage*.out         → go-test
- * - .lcov / .info         → lcov（GcovParser 的 lcov 分支）
- * - .gcov                 → gcov 文本（GcovParser 的 gcov 分支）
- * - coverage.json 等 .json → 内容嗅探：llvm-cov export（data 数组）→ cargo-llvm-cov；
- *                            coverage.py（meta/files/totals）→ coverage-py；c8（statementMap）→ c8
- */
-
-/** 读取 JSON 内容（失败返回 null） */
-function readJson(file) {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf-8'));
-  } catch (e) {
-    return null;
-  }
-}
-
-/** 内容嗅探 JSON 报告类型 */
-function sniffJson(json) {
-  if (!json || typeof json !== 'object') return null;
-  // llvm-cov export：顶层 data 数组，且首个元素含 files
-  if (Array.isArray(json.data) && json.data[0] && Array.isArray(json.data[0].files)) {
-    return 'cargo-llvm-cov';
-  }
-  // coverage.py：meta / totals + files（对象）
-  if ((json.meta || json.totals) && json.files && typeof json.files === 'object') {
-    return 'coverage-py';
-  }
-  // c8 coverage-final：值为 statementMap 对象
-  const values = Object.values(json);
-  if (values.some((v) => v && typeof v === 'object' && v.statementMap)) {
-    return 'c8';
-  }
-  return null;
-}
-
-/** 按文件路径识别工具；无法确定返回 null */
-function detectByPath(file) {
-  const name = path.basename(file).toLowerCase();
-  if (/jacoco\.xml$/i.test(name)) return 'jacoco';
-  if (/coverage-final\.json$/i.test(name)) return 'c8';
-  if (/^coverage[\w.-]*\.(out|cov|txt)$/i.test(name)) return 'go-test';
-  if (/\.(lcov|info)$/i.test(name)) return 'lcov';
-  if (/\.gcov$/i.test(name)) return 'gcov';
-  if (/\.json$/i.test(name)) {
-    const sniffed = sniffJson(readJson(file));
-    if (sniffed) return sniffed;
-    // 兜底：coverage.json 无法识别时按 coverage.py 处理（最常见）
-    if (/coverage\.json$/i.test(name)) return 'coverage-py';
-    return null;
-  }
-  return null;
-}
-
-/** 递归扫描目录，返回文件路径列表 */
-function walkDir(dir, out) {
-  let entries = [];
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch (e) {
-    return out;
-  }
-  for (const entry of entries) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      walkDir(full, out);
-    } else if (entry.isFile()) {
-      out.push(full);
-    }
-  }
-  return out;
-}
-
-/**
- * 扫描输入路径（逗号分隔：文件或目录），返回识别出的报告列表。
- * @param {string[]} inputs 用户输入路径列表
- * @returns {{file: string, tool: string}[]}
- */
-function scan(inputs) {
-  const reports = [];
-  for (const raw of inputs) {
-    const p = raw.trim();
-    if (!p) continue;
-    let abs = p;
-    if (!fs.existsSync(abs)) {
-      const workspace = process.env.WORKSPACE || process.cwd();
-      const joined = path.join(workspace, p);
-      if (fs.existsSync(joined)) abs = joined;
-    }
-    if (!fs.existsSync(abs)) {
-      console.log(`[WARN] 报告路径不存在，跳过: ${p}`);
-      continue;
-    }
-    const stat = fs.statSync(abs);
-    const files = stat.isDirectory() ? walkDir(abs, []) : [abs];
-    for (const file of files) {
-      const tool = detectByPath(file);
-      if (tool) {
-        reports.push({ file, tool });
-      }
-    }
-  }
-  // 去重（同一文件被多次输入命中）
-  const seen = new Set();
-  return reports.filter((r) => {
-    const key = r.file + '|' + r.tool;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-module.exports = { scan, detectByPath, sniffJson, walkDir };
-
-
-/***/ }),
-
-/***/ 7074:
-/***/ ((module) => {
-
-"use strict";
-
-
-/**
- * 覆盖率通用工具：百分比计算（保留 2 位小数）。
- */
-
-/** 四舍五入到 2 位小数 */
-function round2(n) {
-  if (typeof n !== 'number' || !Number.isFinite(n)) return null;
-  return Math.round(n * 100) / 100;
-}
-
-/**
- * 覆盖率百分比：covered / total * 100，保留 2 位小数。
- * total 为 0 或非法时返回 null（表示该指标不可用，调用方按缺省处理）。
- */
-function pct(covered, total) {
-  const c = Number(covered);
-  const t = Number(total);
-  if (!Number.isFinite(c) || !Number.isFinite(t) || t <= 0) return null;
-  return round2((c / t) * 100);
-}
-
-/** 把字符串解析为数字；非法返回 null */
-function toNum(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-module.exports = { round2, pct, toNum };
-
-
-/***/ }),
-
-/***/ 7849:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-/**
- * 最小 fetch polyfill（基于 Node 内置 http/https，零第三方依赖）。
- *
- * 背景：GitCode 插件 runtime 为 node16（action.yml runs.using: node16），无全局 fetch。
- * @openlibing/huaweicloud-oidc-client 的 http.js 在全局 fetch 缺失时回退 require('undici')，
- * 而 undici 未随 ncc 打包产物内联，会导致 "Cannot find module 'undici'"。
- * 此处仅在全局 fetch 缺失时注入，覆盖 SDK sendRequest 的 POST APIG 上报（JSON body）。
- * 不影响 node18+（已有全局 fetch）的环境。
- */
-
-const http = __nccwpck_require__(8611);
-const https = __nccwpck_require__(5692);
-
-/** fetch 响应兼容对象：status / headers.forEach / text() */
-class PolyfillHeaders {
-  constructor(raw) {
-    this._raw = {};
-    for (const k of Object.keys(raw || {})) {
-      this._raw[k.toLowerCase()] = raw[k];
-    }
-  }
-  forEach(cb) {
-    for (const k of Object.keys(this._raw)) {
-      cb(this._raw[k], k);
-    }
-  }
-}
-
-function installFetchPolyfill() {
-  if (typeof globalThis.fetch === 'function') {
-    return; // node 18+ 已有全局 fetch，无需注入
-  }
-
-  globalThis.fetch = function fetchPolyfill(url, options) {
-    return new Promise((resolve, reject) => {
-      const urlObj = new URL(url);
-      const transport = urlObj.protocol === 'https:' ? https : http;
-      const method = (options && options.method) || 'GET';
-      const headers = Object.assign({}, options && options.headers);
-      const body = options && options.body;
-      if (body) {
-        headers['Content-Length'] = Buffer.byteLength(body);
-      }
-
-      const req = transport.request({
-        hostname: urlObj.hostname,
-        port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
-        path: urlObj.pathname + urlObj.search,
-        method,
-        headers,
-        timeout: 30000
-      }, (res) => {
-        const chunks = [];
-        res.on('data', (chunk) => chunks.push(chunk));
-        res.on('end', () => {
-          const raw = Buffer.concat(chunks).toString('utf-8');
-          resolve({
-            status: res.statusCode,
-            headers: new PolyfillHeaders(res.headers),
-            text: () => Promise.resolve(raw)
-          });
-        });
-      });
-
-      req.on('error', (e) => reject(new Error(`${method} ${url}: ${e.message}`)));
-      req.on('timeout', () => req.destroy(new Error(`fetch polyfill timeout after 30000ms: ${method} ${url}`)));
-      if (body) {
-        req.write(body);
-      }
-      req.end();
-    });
-  };
-}
-
-module.exports = { installFetchPolyfill };
-
-
-/***/ }),
-
-/***/ 75:
+/***/ 7960:
 /***/ ((module) => {
 
 module.exports = eval("require")("supports-color");
@@ -26807,7 +26826,7 @@ module.exports = eval("require")("supports-color");
 
 /***/ }),
 
-/***/ 8337:
+/***/ 566:
 /***/ ((module) => {
 
 module.exports = eval("require")("undici");
@@ -26959,7 +26978,7 @@ module.exports = require("zlib");
 
 /***/ }),
 
-/***/ 8686:
+/***/ 2109:
 /***/ ((__unused_webpack_module, exports) => {
 
 "use strict";
@@ -27099,7 +27118,7 @@ exports.fromJSON = fromJSON;
 
 /***/ }),
 
-/***/ 591:
+/***/ 9036:
 /***/ ((module) => {
 
 (()=>{"use strict";var t={d:(e,n)=>{for(var i in n)t.o(n,i)&&!t.o(e,i)&&Object.defineProperty(e,i,{enumerable:!0,get:n[i]})},o:(t,e)=>Object.prototype.hasOwnProperty.call(t,e),r:t=>{"undefined"!=typeof Symbol&&Symbol.toStringTag&&Object.defineProperty(t,Symbol.toStringTag,{value:"Module"}),Object.defineProperty(t,"__esModule",{value:!0})}},e={};t.r(e),t.d(e,{XMLBuilder:()=>pt,XMLParser:()=>st,XMLValidator:()=>xt});const n=":A-Za-z_\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF\\uFDF0-\\uFFFD",i=new RegExp("^["+n+"]["+n+"\\-.\\d\\u00B7\\u0300-\\u036F\\u203F-\\u2040]*$");function s(t,e){const n=[];let i=e.exec(t);for(;i;){const s=[];s.startIndex=e.lastIndex-i[0].length;const r=i.length;for(let t=0;t<r;t++)s.push(i[t]);n.push(s),i=e.exec(t)}return n}const r=function(t){return!(null==i.exec(t))},o={allowBooleanAttributes:!1,unpairedTags:[]};function a(t,e){e=Object.assign({},o,e);const n=[];let i=!1,s=!1;"\ufeff"===t[0]&&(t=t.substr(1));for(let r=0;r<t.length;r++)if("<"===t[r]&&"?"===t[r+1]){if(r+=2,r=u(t,r),r.err)return r}else{if("<"!==t[r]){if(l(t[r]))continue;return m("InvalidChar","char '"+t[r]+"' is not expected.",N(t,r))}{let o=r;if(r++,"!"===t[r]){r=h(t,r);continue}{let a=!1;"/"===t[r]&&(a=!0,r++);let d="";for(;r<t.length&&">"!==t[r]&&" "!==t[r]&&"\t"!==t[r]&&"\n"!==t[r]&&"\r"!==t[r];r++)d+=t[r];if(d=d.trim(),"/"===d[d.length-1]&&(d=d.substring(0,d.length-1),r--),!b(d)){let e;return e=0===d.trim().length?"Invalid space after '<'.":"Tag '"+d+"' is an invalid name.",m("InvalidTag",e,N(t,r))}const p=f(t,r);if(!1===p)return m("InvalidAttr","Attributes for '"+d+"' have open quote.",N(t,r));let c=p.value;if(r=p.index,"/"===c[c.length-1]){const n=r-c.length;c=c.substring(0,c.length-1);const s=g(c,e);if(!0!==s)return m(s.err.code,s.err.msg,N(t,n+s.err.line));i=!0}else if(a){if(!p.tagClosed)return m("InvalidTag","Closing tag '"+d+"' doesn't have proper closing.",N(t,r));if(c.trim().length>0)return m("InvalidTag","Closing tag '"+d+"' can't have attributes or invalid starting.",N(t,o));if(0===n.length)return m("InvalidTag","Closing tag '"+d+"' has not been opened.",N(t,o));{const e=n.pop();if(d!==e.tagName){let n=N(t,e.tagStartPos);return m("InvalidTag","Expected closing tag '"+e.tagName+"' (opened in line "+n.line+", col "+n.col+") instead of closing tag '"+d+"'.",N(t,o))}0==n.length&&(s=!0)}}else{const a=g(c,e);if(!0!==a)return m(a.err.code,a.err.msg,N(t,r-c.length+a.err.line));if(!0===s)return m("InvalidXml","Multiple possible root nodes found.",N(t,r));-1!==e.unpairedTags.indexOf(d)||n.push({tagName:d,tagStartPos:o}),i=!0}for(r++;r<t.length;r++)if("<"===t[r]){if("!"===t[r+1]){r++,r=h(t,r);continue}if("?"!==t[r+1])break;if(r=u(t,++r),r.err)return r}else if("&"===t[r]){const e=x(t,r);if(-1==e)return m("InvalidChar","char '&' is not expected.",N(t,r));r=e}else if(!0===s&&!l(t[r]))return m("InvalidXml","Extra text at the end",N(t,r));"<"===t[r]&&r--}}}return i?1==n.length?m("InvalidTag","Unclosed tag '"+n[0].tagName+"'.",N(t,n[0].tagStartPos)):!(n.length>0)||m("InvalidXml","Invalid '"+JSON.stringify(n.map(t=>t.tagName),null,4).replace(/\r?\n/g,"")+"' found.",{line:1,col:1}):m("InvalidXml","Start tag expected.",1)}function l(t){return" "===t||"\t"===t||"\n"===t||"\r"===t}function u(t,e){const n=e;for(;e<t.length;e++)if("?"==t[e]||" "==t[e]){const i=t.substr(n,e-n);if(e>5&&"xml"===i)return m("InvalidXml","XML declaration allowed only at the start of the document.",N(t,e));if("?"==t[e]&&">"==t[e+1]){e++;break}continue}return e}function h(t,e){if(t.length>e+5&&"-"===t[e+1]&&"-"===t[e+2]){for(e+=3;e<t.length;e++)if("-"===t[e]&&"-"===t[e+1]&&">"===t[e+2]){e+=2;break}}else if(t.length>e+8&&"D"===t[e+1]&&"O"===t[e+2]&&"C"===t[e+3]&&"T"===t[e+4]&&"Y"===t[e+5]&&"P"===t[e+6]&&"E"===t[e+7]){let n=1;for(e+=8;e<t.length;e++)if("<"===t[e])n++;else if(">"===t[e]&&(n--,0===n))break}else if(t.length>e+9&&"["===t[e+1]&&"C"===t[e+2]&&"D"===t[e+3]&&"A"===t[e+4]&&"T"===t[e+5]&&"A"===t[e+6]&&"["===t[e+7])for(e+=8;e<t.length;e++)if("]"===t[e]&&"]"===t[e+1]&&">"===t[e+2]){e+=2;break}return e}const d='"',p="'";function f(t,e){let n="",i="",s=!1;for(;e<t.length;e++){if(t[e]===d||t[e]===p)""===i?i=t[e]:i!==t[e]||(i="");else if(">"===t[e]&&""===i){s=!0;break}n+=t[e]}return""===i&&{value:n,index:e,tagClosed:s}}const c=new RegExp("(\\s*)([^\\s=]+)(\\s*=)?(\\s*(['\"])(([\\s\\S])*?)\\5)?","g");function g(t,e){const n=s(t,c),i={};for(let t=0;t<n.length;t++){if(0===n[t][1].length)return m("InvalidAttr","Attribute '"+n[t][2]+"' has no space in starting.",y(n[t]));if(void 0!==n[t][3]&&void 0===n[t][4])return m("InvalidAttr","Attribute '"+n[t][2]+"' is without value.",y(n[t]));if(void 0===n[t][3]&&!e.allowBooleanAttributes)return m("InvalidAttr","boolean attribute '"+n[t][2]+"' is not allowed.",y(n[t]));const s=n[t][2];if(!E(s))return m("InvalidAttr","Attribute '"+s+"' is an invalid name.",y(n[t]));if(i.hasOwnProperty(s))return m("InvalidAttr","Attribute '"+s+"' is repeated.",y(n[t]));i[s]=1}return!0}function x(t,e){if(";"===t[++e])return-1;if("#"===t[e])return function(t,e){let n=/\d/;for("x"===t[e]&&(e++,n=/[\da-fA-F]/);e<t.length;e++){if(";"===t[e])return e;if(!t[e].match(n))break}return-1}(t,++e);let n=0;for(;e<t.length;e++,n++)if(!(t[e].match(/\w/)&&n<20)){if(";"===t[e])break;return-1}return e}function m(t,e,n){return{err:{code:t,msg:e,line:n.line||n,col:n.col}}}function E(t){return r(t)}function b(t){return r(t)}function N(t,e){const n=t.substring(0,e).split(/\r?\n/);return{line:n.length,col:n[n.length-1].length+1}}function y(t){return t.startIndex+t[1].length}const T={preserveOrder:!1,attributeNamePrefix:"@_",attributesGroupName:!1,textNodeName:"#text",ignoreAttributes:!0,removeNSPrefix:!1,allowBooleanAttributes:!1,parseTagValue:!0,parseAttributeValue:!1,trimValues:!0,cdataPropName:!1,numberParseOptions:{hex:!0,leadingZeros:!0,eNotation:!0},tagValueProcessor:function(t,e){return e},attributeValueProcessor:function(t,e){return e},stopNodes:[],alwaysCreateTextNode:!1,isArray:()=>!1,commentPropName:!1,unpairedTags:[],processEntities:!0,htmlEntities:!1,ignoreDeclaration:!1,ignorePiTags:!1,transformTagName:!1,transformAttributeName:!1,updateTag:function(t,e,n){return t},captureMetaData:!1};function w(t){return"boolean"==typeof t?{enabled:t,maxEntitySize:1e4,maxExpansionDepth:10,maxTotalExpansions:1e3,maxExpandedLength:1e5,allowedTags:null,tagFilter:null}:"object"==typeof t&&null!==t?{enabled:!1!==t.enabled,maxEntitySize:t.maxEntitySize??1e4,maxExpansionDepth:t.maxExpansionDepth??10,maxTotalExpansions:t.maxTotalExpansions??1e3,maxExpandedLength:t.maxExpandedLength??1e5,allowedTags:t.allowedTags??null,tagFilter:t.tagFilter??null}:w(!0)}const v=function(t){const e=Object.assign({},T,t);return e.processEntities=w(e.processEntities),e};let I;I="function"!=typeof Symbol?"@@xmlMetadata":Symbol("XML Node Metadata");class O{constructor(t){this.tagname=t,this.child=[],this[":@"]={}}add(t,e){"__proto__"===t&&(t="#__proto__"),this.child.push({[t]:e})}addChild(t,e){"__proto__"===t.tagname&&(t.tagname="#__proto__"),t[":@"]&&Object.keys(t[":@"]).length>0?this.child.push({[t.tagname]:t.child,":@":t[":@"]}):this.child.push({[t.tagname]:t.child}),void 0!==e&&(this.child[this.child.length-1][I]={startIndex:e})}static getMetaDataSymbol(){return I}}class P{constructor(t){this.suppressValidationErr=!t,this.options=t}readDocType(t,e){const n={};if("O"!==t[e+3]||"C"!==t[e+4]||"T"!==t[e+5]||"Y"!==t[e+6]||"P"!==t[e+7]||"E"!==t[e+8])throw new Error("Invalid Tag instead of DOCTYPE");{e+=9;let i=1,s=!1,r=!1,o="";for(;e<t.length;e++)if("<"!==t[e]||r)if(">"===t[e]){if(r?"-"===t[e-1]&&"-"===t[e-2]&&(r=!1,i--):i--,0===i)break}else"["===t[e]?s=!0:o+=t[e];else{if(s&&S(t,"!ENTITY",e)){let i,s;if(e+=7,[i,s,e]=this.readEntityExp(t,e+1,this.suppressValidationErr),-1===s.indexOf("&")){const t=i.replace(/[.\-+*:]/g,"\\.");n[i]={regx:RegExp(`&${t};`,"g"),val:s}}}else if(s&&S(t,"!ELEMENT",e)){e+=8;const{index:n}=this.readElementExp(t,e+1);e=n}else if(s&&S(t,"!ATTLIST",e))e+=8;else if(s&&S(t,"!NOTATION",e)){e+=9;const{index:n}=this.readNotationExp(t,e+1,this.suppressValidationErr);e=n}else{if(!S(t,"!--",e))throw new Error("Invalid DOCTYPE");r=!0}i++,o=""}if(0!==i)throw new Error("Unclosed DOCTYPE")}return{entities:n,i:e}}readEntityExp(t,e){e=A(t,e);let n="";for(;e<t.length&&!/\s/.test(t[e])&&'"'!==t[e]&&"'"!==t[e];)n+=t[e],e++;if(C(n),e=A(t,e),!this.suppressValidationErr){if("SYSTEM"===t.substring(e,e+6).toUpperCase())throw new Error("External entities are not supported");if("%"===t[e])throw new Error("Parameter entities are not supported")}let i="";if([e,i]=this.readIdentifierVal(t,e,"entity"),!1!==this.options.enabled&&this.options.maxEntitySize&&i.length>this.options.maxEntitySize)throw new Error(`Entity "${n}" size (${i.length}) exceeds maximum allowed size (${this.options.maxEntitySize})`);return[n,i,--e]}readNotationExp(t,e){e=A(t,e);let n="";for(;e<t.length&&!/\s/.test(t[e]);)n+=t[e],e++;!this.suppressValidationErr&&C(n),e=A(t,e);const i=t.substring(e,e+6).toUpperCase();if(!this.suppressValidationErr&&"SYSTEM"!==i&&"PUBLIC"!==i)throw new Error(`Expected SYSTEM or PUBLIC, found "${i}"`);e+=i.length,e=A(t,e);let s=null,r=null;if("PUBLIC"===i)[e,s]=this.readIdentifierVal(t,e,"publicIdentifier"),'"'!==t[e=A(t,e)]&&"'"!==t[e]||([e,r]=this.readIdentifierVal(t,e,"systemIdentifier"));else if("SYSTEM"===i&&([e,r]=this.readIdentifierVal(t,e,"systemIdentifier"),!this.suppressValidationErr&&!r))throw new Error("Missing mandatory system identifier for SYSTEM notation");return{notationName:n,publicIdentifier:s,systemIdentifier:r,index:--e}}readIdentifierVal(t,e,n){let i="";const s=t[e];if('"'!==s&&"'"!==s)throw new Error(`Expected quoted string, found "${s}"`);for(e++;e<t.length&&t[e]!==s;)i+=t[e],e++;if(t[e]!==s)throw new Error(`Unterminated ${n} value`);return[++e,i]}readElementExp(t,e){e=A(t,e);let n="";for(;e<t.length&&!/\s/.test(t[e]);)n+=t[e],e++;if(!this.suppressValidationErr&&!r(n))throw new Error(`Invalid element name: "${n}"`);let i="";if("E"===t[e=A(t,e)]&&S(t,"MPTY",e))e+=4;else if("A"===t[e]&&S(t,"NY",e))e+=2;else if("("===t[e]){for(e++;e<t.length&&")"!==t[e];)i+=t[e],e++;if(")"!==t[e])throw new Error("Unterminated content model")}else if(!this.suppressValidationErr)throw new Error(`Invalid Element Expression, found "${t[e]}"`);return{elementName:n,contentModel:i.trim(),index:e}}readAttlistExp(t,e){e=A(t,e);let n="";for(;e<t.length&&!/\s/.test(t[e]);)n+=t[e],e++;C(n),e=A(t,e);let i="";for(;e<t.length&&!/\s/.test(t[e]);)i+=t[e],e++;if(!C(i))throw new Error(`Invalid attribute name: "${i}"`);e=A(t,e);let s="";if("NOTATION"===t.substring(e,e+8).toUpperCase()){if(s="NOTATION","("!==t[e=A(t,e+=8)])throw new Error(`Expected '(', found "${t[e]}"`);e++;let n=[];for(;e<t.length&&")"!==t[e];){let i="";for(;e<t.length&&"|"!==t[e]&&")"!==t[e];)i+=t[e],e++;if(i=i.trim(),!C(i))throw new Error(`Invalid notation name: "${i}"`);n.push(i),"|"===t[e]&&(e++,e=A(t,e))}if(")"!==t[e])throw new Error("Unterminated list of notations");e++,s+=" ("+n.join("|")+")"}else{for(;e<t.length&&!/\s/.test(t[e]);)s+=t[e],e++;const n=["CDATA","ID","IDREF","IDREFS","ENTITY","ENTITIES","NMTOKEN","NMTOKENS"];if(!this.suppressValidationErr&&!n.includes(s.toUpperCase()))throw new Error(`Invalid attribute type: "${s}"`)}e=A(t,e);let r="";return"#REQUIRED"===t.substring(e,e+8).toUpperCase()?(r="#REQUIRED",e+=8):"#IMPLIED"===t.substring(e,e+7).toUpperCase()?(r="#IMPLIED",e+=7):[e,r]=this.readIdentifierVal(t,e,"ATTLIST"),{elementName:n,attributeName:i,attributeType:s,defaultValue:r,index:e}}}const A=(t,e)=>{for(;e<t.length&&/\s/.test(t[e]);)e++;return e};function S(t,e,n){for(let i=0;i<e.length;i++)if(e[i]!==t[n+i+1])return!1;return!0}function C(t){if(r(t))return t;throw new Error(`Invalid entity name ${t}`)}const $=/^[-+]?0x[a-fA-F0-9]+$/,V=/^([\-\+])?(0*)([0-9]*(\.[0-9]*)?)$/,D={hex:!0,leadingZeros:!0,decimalPoint:".",eNotation:!0};const L=/^([-+])?(0*)(\d*(\.\d*)?[eE][-\+]?\d+)$/;function F(t){return"function"==typeof t?t:Array.isArray(t)?e=>{for(const n of t){if("string"==typeof n&&e===n)return!0;if(n instanceof RegExp&&n.test(e))return!0}}:()=>!1}class j{constructor(t){if(this.options=t,this.currentNode=null,this.tagsNodeStack=[],this.docTypeEntities={},this.lastEntities={apos:{regex:/&(apos|#39|#x27);/g,val:"'"},gt:{regex:/&(gt|#62|#x3E);/g,val:">"},lt:{regex:/&(lt|#60|#x3C);/g,val:"<"},quot:{regex:/&(quot|#34|#x22);/g,val:'"'}},this.ampEntity={regex:/&(amp|#38|#x26);/g,val:"&"},this.htmlEntities={space:{regex:/&(nbsp|#160);/g,val:" "},cent:{regex:/&(cent|#162);/g,val:"¢"},pound:{regex:/&(pound|#163);/g,val:"£"},yen:{regex:/&(yen|#165);/g,val:"¥"},euro:{regex:/&(euro|#8364);/g,val:"€"},copyright:{regex:/&(copy|#169);/g,val:"©"},reg:{regex:/&(reg|#174);/g,val:"®"},inr:{regex:/&(inr|#8377);/g,val:"₹"},num_dec:{regex:/&#([0-9]{1,7});/g,val:(t,e)=>Q(e,10,"&#")},num_hex:{regex:/&#x([0-9a-fA-F]{1,6});/g,val:(t,e)=>Q(e,16,"&#x")}},this.addExternalEntities=M,this.parseXml=R,this.parseTextData=_,this.resolveNameSpace=k,this.buildAttributesMap=B,this.isItStopNode=z,this.replaceEntitiesValue=G,this.readStopNodeData=Z,this.saveTextToParentTag=X,this.addChild=Y,this.ignoreAttributesFn=F(this.options.ignoreAttributes),this.entityExpansionCount=0,this.currentExpandedLength=0,this.options.stopNodes&&this.options.stopNodes.length>0){this.stopNodesExact=new Set,this.stopNodesWildcard=new Set;for(let t=0;t<this.options.stopNodes.length;t++){const e=this.options.stopNodes[t];"string"==typeof e&&(e.startsWith("*.")?this.stopNodesWildcard.add(e.substring(2)):this.stopNodesExact.add(e))}}}}function M(t){const e=Object.keys(t);for(let n=0;n<e.length;n++){const i=e[n],s=i.replace(/[.\-+*:]/g,"\\.");this.lastEntities[i]={regex:new RegExp("&"+s+";","g"),val:t[i]}}}function _(t,e,n,i,s,r,o){if(void 0!==t&&(this.options.trimValues&&!i&&(t=t.trim()),t.length>0)){o||(t=this.replaceEntitiesValue(t,e,n));const i=this.options.tagValueProcessor(e,t,n,s,r);return null==i?t:typeof i!=typeof t||i!==t?i:this.options.trimValues||t.trim()===t?K(t,this.options.parseTagValue,this.options.numberParseOptions):t}}function k(t){if(this.options.removeNSPrefix){const e=t.split(":"),n="/"===t.charAt(0)?"/":"";if("xmlns"===e[0])return"";2===e.length&&(t=n+e[1])}return t}const U=new RegExp("([^\\s=]+)\\s*(=\\s*(['\"])([\\s\\S]*?)\\3)?","gm");function B(t,e,n){if(!0!==this.options.ignoreAttributes&&"string"==typeof t){const i=s(t,U),r=i.length,o={};for(let t=0;t<r;t++){const s=this.resolveNameSpace(i[t][1]);if(this.ignoreAttributesFn(s,e))continue;let r=i[t][4],a=this.options.attributeNamePrefix+s;if(s.length)if(this.options.transformAttributeName&&(a=this.options.transformAttributeName(a)),"__proto__"===a&&(a="#__proto__"),void 0!==r){this.options.trimValues&&(r=r.trim()),r=this.replaceEntitiesValue(r,n,e);const t=this.options.attributeValueProcessor(s,r,e);o[a]=null==t?r:typeof t!=typeof r||t!==r?t:K(r,this.options.parseAttributeValue,this.options.numberParseOptions)}else this.options.allowBooleanAttributes&&(o[a]=!0)}if(!Object.keys(o).length)return;if(this.options.attributesGroupName){const t={};return t[this.options.attributesGroupName]=o,t}return o}}const R=function(t){t=t.replace(/\r\n?/g,"\n");const e=new O("!xml");let n=e,i="",s="";this.entityExpansionCount=0,this.currentExpandedLength=0;const r=new P(this.options.processEntities);for(let o=0;o<t.length;o++)if("<"===t[o])if("/"===t[o+1]){const e=W(t,">",o,"Closing Tag is not closed.");let r=t.substring(o+2,e).trim();if(this.options.removeNSPrefix){const t=r.indexOf(":");-1!==t&&(r=r.substr(t+1))}this.options.transformTagName&&(r=this.options.transformTagName(r)),n&&(i=this.saveTextToParentTag(i,n,s));const a=s.substring(s.lastIndexOf(".")+1);if(r&&-1!==this.options.unpairedTags.indexOf(r))throw new Error(`Unpaired tag can not be used as closing tag: </${r}>`);let l=0;a&&-1!==this.options.unpairedTags.indexOf(a)?(l=s.lastIndexOf(".",s.lastIndexOf(".")-1),this.tagsNodeStack.pop()):l=s.lastIndexOf("."),s=s.substring(0,l),n=this.tagsNodeStack.pop(),i="",o=e}else if("?"===t[o+1]){let e=q(t,o,!1,"?>");if(!e)throw new Error("Pi Tag is not closed.");if(i=this.saveTextToParentTag(i,n,s),this.options.ignoreDeclaration&&"?xml"===e.tagName||this.options.ignorePiTags);else{const t=new O(e.tagName);t.add(this.options.textNodeName,""),e.tagName!==e.tagExp&&e.attrExpPresent&&(t[":@"]=this.buildAttributesMap(e.tagExp,s,e.tagName)),this.addChild(n,t,s,o)}o=e.closeIndex+1}else if("!--"===t.substr(o+1,3)){const e=W(t,"--\x3e",o+4,"Comment is not closed.");if(this.options.commentPropName){const r=t.substring(o+4,e-2);i=this.saveTextToParentTag(i,n,s),n.add(this.options.commentPropName,[{[this.options.textNodeName]:r}])}o=e}else if("!D"===t.substr(o+1,2)){const e=r.readDocType(t,o);this.docTypeEntities=e.entities,o=e.i}else if("!["===t.substr(o+1,2)){const e=W(t,"]]>",o,"CDATA is not closed.")-2,r=t.substring(o+9,e);i=this.saveTextToParentTag(i,n,s);let a=this.parseTextData(r,n.tagname,s,!0,!1,!0,!0);null==a&&(a=""),this.options.cdataPropName?n.add(this.options.cdataPropName,[{[this.options.textNodeName]:r}]):n.add(this.options.textNodeName,a),o=e+2}else{let r=q(t,o,this.options.removeNSPrefix),a=r.tagName;const l=r.rawTagName;let u=r.tagExp,h=r.attrExpPresent,d=r.closeIndex;if(this.options.transformTagName){const t=this.options.transformTagName(a);u===a&&(u=t),a=t}n&&i&&"!xml"!==n.tagname&&(i=this.saveTextToParentTag(i,n,s,!1));const p=n;p&&-1!==this.options.unpairedTags.indexOf(p.tagname)&&(n=this.tagsNodeStack.pop(),s=s.substring(0,s.lastIndexOf("."))),a!==e.tagname&&(s+=s?"."+a:a);const f=o;if(this.isItStopNode(this.stopNodesExact,this.stopNodesWildcard,s,a)){let e="";if(u.length>0&&u.lastIndexOf("/")===u.length-1)"/"===a[a.length-1]?(a=a.substr(0,a.length-1),s=s.substr(0,s.length-1),u=a):u=u.substr(0,u.length-1),o=r.closeIndex;else if(-1!==this.options.unpairedTags.indexOf(a))o=r.closeIndex;else{const n=this.readStopNodeData(t,l,d+1);if(!n)throw new Error(`Unexpected end of ${l}`);o=n.i,e=n.tagContent}const i=new O(a);a!==u&&h&&(i[":@"]=this.buildAttributesMap(u,s,a)),e&&(e=this.parseTextData(e,a,s,!0,h,!0,!0)),s=s.substr(0,s.lastIndexOf(".")),i.add(this.options.textNodeName,e),this.addChild(n,i,s,f)}else{if(u.length>0&&u.lastIndexOf("/")===u.length-1){if("/"===a[a.length-1]?(a=a.substr(0,a.length-1),s=s.substr(0,s.length-1),u=a):u=u.substr(0,u.length-1),this.options.transformTagName){const t=this.options.transformTagName(a);u===a&&(u=t),a=t}const t=new O(a);a!==u&&h&&(t[":@"]=this.buildAttributesMap(u,s,a)),this.addChild(n,t,s,f),s=s.substr(0,s.lastIndexOf("."))}else{const t=new O(a);this.tagsNodeStack.push(n),a!==u&&h&&(t[":@"]=this.buildAttributesMap(u,s,a)),this.addChild(n,t,s,f),n=t}i="",o=d}}else i+=t[o];return e.child};function Y(t,e,n,i){this.options.captureMetaData||(i=void 0);const s=this.options.updateTag(e.tagname,n,e[":@"]);!1===s||("string"==typeof s?(e.tagname=s,t.addChild(e,i)):t.addChild(e,i))}const G=function(t,e,n){if(-1===t.indexOf("&"))return t;const i=this.options.processEntities;if(!i.enabled)return t;if(i.allowedTags&&!i.allowedTags.includes(e))return t;if(i.tagFilter&&!i.tagFilter(e,n))return t;for(let e in this.docTypeEntities){const n=this.docTypeEntities[e],s=t.match(n.regx);if(s){if(this.entityExpansionCount+=s.length,i.maxTotalExpansions&&this.entityExpansionCount>i.maxTotalExpansions)throw new Error(`Entity expansion limit exceeded: ${this.entityExpansionCount} > ${i.maxTotalExpansions}`);const e=t.length;if(t=t.replace(n.regx,n.val),i.maxExpandedLength&&(this.currentExpandedLength+=t.length-e,this.currentExpandedLength>i.maxExpandedLength))throw new Error(`Total expanded content size exceeded: ${this.currentExpandedLength} > ${i.maxExpandedLength}`)}}if(-1===t.indexOf("&"))return t;for(let e in this.lastEntities){const n=this.lastEntities[e];t=t.replace(n.regex,n.val)}if(-1===t.indexOf("&"))return t;if(this.options.htmlEntities)for(let e in this.htmlEntities){const n=this.htmlEntities[e];t=t.replace(n.regex,n.val)}return t.replace(this.ampEntity.regex,this.ampEntity.val)};function X(t,e,n,i){return t&&(void 0===i&&(i=0===e.child.length),void 0!==(t=this.parseTextData(t,e.tagname,n,!1,!!e[":@"]&&0!==Object.keys(e[":@"]).length,i))&&""!==t&&e.add(this.options.textNodeName,t),t=""),t}function z(t,e,n,i){return!(!e||!e.has(i))||!(!t||!t.has(n))}function W(t,e,n,i){const s=t.indexOf(e,n);if(-1===s)throw new Error(i);return s+e.length-1}function q(t,e,n,i=">"){const s=function(t,e,n=">"){let i,s="";for(let r=e;r<t.length;r++){let e=t[r];if(i)e===i&&(i="");else if('"'===e||"'"===e)i=e;else if(e===n[0]){if(!n[1])return{data:s,index:r};if(t[r+1]===n[1])return{data:s,index:r}}else"\t"===e&&(e=" ");s+=e}}(t,e+1,i);if(!s)return;let r=s.data;const o=s.index,a=r.search(/\s/);let l=r,u=!0;-1!==a&&(l=r.substring(0,a),r=r.substring(a+1).trimStart());const h=l;if(n){const t=l.indexOf(":");-1!==t&&(l=l.substr(t+1),u=l!==s.data.substr(t+1))}return{tagName:l,tagExp:r,closeIndex:o,attrExpPresent:u,rawTagName:h}}function Z(t,e,n){const i=n;let s=1;for(;n<t.length;n++)if("<"===t[n])if("/"===t[n+1]){const r=W(t,">",n,`${e} is not closed`);if(t.substring(n+2,r).trim()===e&&(s--,0===s))return{tagContent:t.substring(i,n),i:r};n=r}else if("?"===t[n+1])n=W(t,"?>",n+1,"StopNode is not closed.");else if("!--"===t.substr(n+1,3))n=W(t,"--\x3e",n+3,"StopNode is not closed.");else if("!["===t.substr(n+1,2))n=W(t,"]]>",n,"StopNode is not closed.")-2;else{const i=q(t,n,">");i&&((i&&i.tagName)===e&&"/"!==i.tagExp[i.tagExp.length-1]&&s++,n=i.closeIndex)}}function K(t,e,n){if(e&&"string"==typeof t){const e=t.trim();return"true"===e||"false"!==e&&function(t,e={}){if(e=Object.assign({},D,e),!t||"string"!=typeof t)return t;let n=t.trim();if(void 0!==e.skipLike&&e.skipLike.test(n))return t;if("0"===t)return 0;if(e.hex&&$.test(n))return function(t){if(parseInt)return parseInt(t,16);if(Number.parseInt)return Number.parseInt(t,16);if(window&&window.parseInt)return window.parseInt(t,16);throw new Error("parseInt, Number.parseInt, window.parseInt are not supported")}(n);if(n.includes("e")||n.includes("E"))return function(t,e,n){if(!n.eNotation)return t;const i=e.match(L);if(i){let s=i[1]||"";const r=-1===i[3].indexOf("e")?"E":"e",o=i[2],a=s?t[o.length+1]===r:t[o.length]===r;return o.length>1&&a?t:1!==o.length||!i[3].startsWith(`.${r}`)&&i[3][0]!==r?n.leadingZeros&&!a?(e=(i[1]||"")+i[3],Number(e)):t:Number(e)}return t}(t,n,e);{const s=V.exec(n);if(s){const r=s[1]||"",o=s[2];let a=(i=s[3])&&-1!==i.indexOf(".")?("."===(i=i.replace(/0+$/,""))?i="0":"."===i[0]?i="0"+i:"."===i[i.length-1]&&(i=i.substring(0,i.length-1)),i):i;const l=r?"."===t[o.length+1]:"."===t[o.length];if(!e.leadingZeros&&(o.length>1||1===o.length&&!l))return t;{const i=Number(n),s=String(i);if(0===i)return i;if(-1!==s.search(/[eE]/))return e.eNotation?i:t;if(-1!==n.indexOf("."))return"0"===s||s===a||s===`${r}${a}`?i:t;let l=o?a:n;return o?l===s||r+l===s?i:t:l===s||l===r+s?i:t}}return t}var i}(t,n)}return void 0!==t?t:""}function Q(t,e,n){const i=Number.parseInt(t,e);return i>=0&&i<=1114111?String.fromCodePoint(i):n+t+";"}const J=O.getMetaDataSymbol();function H(t,e){return tt(t,e)}function tt(t,e,n){let i;const s={};for(let r=0;r<t.length;r++){const o=t[r],a=et(o);let l="";if(l=void 0===n?a:n+"."+a,a===e.textNodeName)void 0===i?i=o[a]:i+=""+o[a];else{if(void 0===a)continue;if(o[a]){let t=tt(o[a],e,l);const n=it(t,e);void 0!==o[J]&&(t[J]=o[J]),o[":@"]?nt(t,o[":@"],l,e):1!==Object.keys(t).length||void 0===t[e.textNodeName]||e.alwaysCreateTextNode?0===Object.keys(t).length&&(e.alwaysCreateTextNode?t[e.textNodeName]="":t=""):t=t[e.textNodeName],void 0!==s[a]&&s.hasOwnProperty(a)?(Array.isArray(s[a])||(s[a]=[s[a]]),s[a].push(t)):e.isArray(a,l,n)?s[a]=[t]:s[a]=t}}}return"string"==typeof i?i.length>0&&(s[e.textNodeName]=i):void 0!==i&&(s[e.textNodeName]=i),s}function et(t){const e=Object.keys(t);for(let t=0;t<e.length;t++){const n=e[t];if(":@"!==n)return n}}function nt(t,e,n,i){if(e){const s=Object.keys(e),r=s.length;for(let o=0;o<r;o++){const r=s[o];i.isArray(r,n+"."+r,!0,!0)?t[r]=[e[r]]:t[r]=e[r]}}}function it(t,e){const{textNodeName:n}=e,i=Object.keys(t).length;return 0===i||!(1!==i||!t[n]&&"boolean"!=typeof t[n]&&0!==t[n])}class st{constructor(t){this.externalEntities={},this.options=v(t)}parse(t,e){if("string"!=typeof t&&t.toString)t=t.toString();else if("string"!=typeof t)throw new Error("XML data is accepted in String or Bytes[] form.");if(e){!0===e&&(e={});const n=a(t,e);if(!0!==n)throw Error(`${n.err.msg}:${n.err.line}:${n.err.col}`)}const n=new j(this.options);n.addExternalEntities(this.externalEntities);const i=n.parseXml(t);return this.options.preserveOrder||void 0===i?i:H(i,this.options)}addEntity(t,e){if(-1!==e.indexOf("&"))throw new Error("Entity value can't have '&'");if(-1!==t.indexOf("&")||-1!==t.indexOf(";"))throw new Error("An entity must be set without '&' and ';'. Eg. use '#xD' for '&#xD;'");if("&"===e)throw new Error("An entity with value '&' is not permitted");this.externalEntities[t]=e}static getMetaDataSymbol(){return O.getMetaDataSymbol()}}function rt(t,e){let n="";return e.format&&e.indentBy.length>0&&(n="\n"),ot(t,e,"",n)}function ot(t,e,n,i){let s="",r=!1;for(let o=0;o<t.length;o++){const a=t[o],l=at(a);if(void 0===l)continue;let u="";if(u=0===n.length?l:`${n}.${l}`,l===e.textNodeName){let t=a[l];ut(u,e)||(t=e.tagValueProcessor(l,t),t=ht(t,e)),r&&(s+=i),s+=t,r=!1;continue}if(l===e.cdataPropName){r&&(s+=i),s+=`<![CDATA[${a[l][0][e.textNodeName]}]]>`,r=!1;continue}if(l===e.commentPropName){s+=i+`\x3c!--${a[l][0][e.textNodeName]}--\x3e`,r=!0;continue}if("?"===l[0]){const t=lt(a[":@"],e),n="?xml"===l?"":i;let o=a[l][0][e.textNodeName];o=0!==o.length?" "+o:"",s+=n+`<${l}${o}${t}?>`,r=!0;continue}let h=i;""!==h&&(h+=e.indentBy);const d=i+`<${l}${lt(a[":@"],e)}`,p=ot(a[l],e,u,h);-1!==e.unpairedTags.indexOf(l)?e.suppressUnpairedNode?s+=d+">":s+=d+"/>":p&&0!==p.length||!e.suppressEmptyNode?p&&p.endsWith(">")?s+=d+`>${p}${i}</${l}>`:(s+=d+">",p&&""!==i&&(p.includes("/>")||p.includes("</"))?s+=i+e.indentBy+p+i:s+=p,s+=`</${l}>`):s+=d+"/>",r=!0}return s}function at(t){const e=Object.keys(t);for(let n=0;n<e.length;n++){const i=e[n];if(t.hasOwnProperty(i)&&":@"!==i)return i}}function lt(t,e){let n="";if(t&&!e.ignoreAttributes)for(let i in t){if(!t.hasOwnProperty(i))continue;let s=e.attributeValueProcessor(i,t[i]);s=ht(s,e),!0===s&&e.suppressBooleanAttributes?n+=` ${i.substr(e.attributeNamePrefix.length)}`:n+=` ${i.substr(e.attributeNamePrefix.length)}="${s}"`}return n}function ut(t,e){let n=(t=t.substr(0,t.length-e.textNodeName.length-1)).substr(t.lastIndexOf(".")+1);for(let i in e.stopNodes)if(e.stopNodes[i]===t||e.stopNodes[i]==="*."+n)return!0;return!1}function ht(t,e){if(t&&t.length>0&&e.processEntities)for(let n=0;n<e.entities.length;n++){const i=e.entities[n];t=t.replace(i.regex,i.val)}return t}const dt={attributeNamePrefix:"@_",attributesGroupName:!1,textNodeName:"#text",ignoreAttributes:!0,cdataPropName:!1,format:!1,indentBy:"  ",suppressEmptyNode:!1,suppressUnpairedNode:!0,suppressBooleanAttributes:!0,tagValueProcessor:function(t,e){return e},attributeValueProcessor:function(t,e){return e},preserveOrder:!1,commentPropName:!1,unpairedTags:[],entities:[{regex:new RegExp("&","g"),val:"&amp;"},{regex:new RegExp(">","g"),val:"&gt;"},{regex:new RegExp("<","g"),val:"&lt;"},{regex:new RegExp("'","g"),val:"&apos;"},{regex:new RegExp('"',"g"),val:"&quot;"}],processEntities:!0,stopNodes:[],oneListGroup:!1};function pt(t){this.options=Object.assign({},dt,t),!0===this.options.ignoreAttributes||this.options.attributesGroupName?this.isAttribute=function(){return!1}:(this.ignoreAttributesFn=F(this.options.ignoreAttributes),this.attrPrefixLen=this.options.attributeNamePrefix.length,this.isAttribute=gt),this.processTextOrObjNode=ft,this.options.format?(this.indentate=ct,this.tagEndChar=">\n",this.newLine="\n"):(this.indentate=function(){return""},this.tagEndChar=">",this.newLine="")}function ft(t,e,n,i){const s=this.j2x(t,n+1,i.concat(e));return void 0!==t[this.options.textNodeName]&&1===Object.keys(t).length?this.buildTextValNode(t[this.options.textNodeName],e,s.attrStr,n):this.buildObjectNode(s.val,e,s.attrStr,n)}function ct(t){return this.options.indentBy.repeat(t)}function gt(t){return!(!t.startsWith(this.options.attributeNamePrefix)||t===this.options.textNodeName)&&t.substr(this.attrPrefixLen)}pt.prototype.build=function(t){return this.options.preserveOrder?rt(t,this.options):(Array.isArray(t)&&this.options.arrayNodeName&&this.options.arrayNodeName.length>1&&(t={[this.options.arrayNodeName]:t}),this.j2x(t,0,[]).val)},pt.prototype.j2x=function(t,e,n){let i="",s="";const r=n.join(".");for(let o in t)if(Object.prototype.hasOwnProperty.call(t,o))if(void 0===t[o])this.isAttribute(o)&&(s+="");else if(null===t[o])this.isAttribute(o)||o===this.options.cdataPropName?s+="":"?"===o[0]?s+=this.indentate(e)+"<"+o+"?"+this.tagEndChar:s+=this.indentate(e)+"<"+o+"/"+this.tagEndChar;else if(t[o]instanceof Date)s+=this.buildTextValNode(t[o],o,"",e);else if("object"!=typeof t[o]){const n=this.isAttribute(o);if(n&&!this.ignoreAttributesFn(n,r))i+=this.buildAttrPairStr(n,""+t[o]);else if(!n)if(o===this.options.textNodeName){let e=this.options.tagValueProcessor(o,""+t[o]);s+=this.replaceEntitiesValue(e)}else s+=this.buildTextValNode(t[o],o,"",e)}else if(Array.isArray(t[o])){const i=t[o].length;let r="",a="";for(let l=0;l<i;l++){const i=t[o][l];if(void 0===i);else if(null===i)"?"===o[0]?s+=this.indentate(e)+"<"+o+"?"+this.tagEndChar:s+=this.indentate(e)+"<"+o+"/"+this.tagEndChar;else if("object"==typeof i)if(this.options.oneListGroup){const t=this.j2x(i,e+1,n.concat(o));r+=t.val,this.options.attributesGroupName&&i.hasOwnProperty(this.options.attributesGroupName)&&(a+=t.attrStr)}else r+=this.processTextOrObjNode(i,o,e,n);else if(this.options.oneListGroup){let t=this.options.tagValueProcessor(o,i);t=this.replaceEntitiesValue(t),r+=t}else r+=this.buildTextValNode(i,o,"",e)}this.options.oneListGroup&&(r=this.buildObjectNode(r,o,a,e)),s+=r}else if(this.options.attributesGroupName&&o===this.options.attributesGroupName){const e=Object.keys(t[o]),n=e.length;for(let s=0;s<n;s++)i+=this.buildAttrPairStr(e[s],""+t[o][e[s]])}else s+=this.processTextOrObjNode(t[o],o,e,n);return{attrStr:i,val:s}},pt.prototype.buildAttrPairStr=function(t,e){return e=this.options.attributeValueProcessor(t,""+e),e=this.replaceEntitiesValue(e),this.options.suppressBooleanAttributes&&"true"===e?" "+t:" "+t+'="'+e+'"'},pt.prototype.buildObjectNode=function(t,e,n,i){if(""===t)return"?"===e[0]?this.indentate(i)+"<"+e+n+"?"+this.tagEndChar:this.indentate(i)+"<"+e+n+this.closeTag(e)+this.tagEndChar;{let s="</"+e+this.tagEndChar,r="";return"?"===e[0]&&(r="?",s=""),!n&&""!==n||-1!==t.indexOf("<")?!1!==this.options.commentPropName&&e===this.options.commentPropName&&0===r.length?this.indentate(i)+`\x3c!--${t}--\x3e`+this.newLine:this.indentate(i)+"<"+e+n+r+this.tagEndChar+t+this.indentate(i)+s:this.indentate(i)+"<"+e+n+r+">"+t+s}},pt.prototype.closeTag=function(t){let e="";return-1!==this.options.unpairedTags.indexOf(t)?this.options.suppressUnpairedNode||(e="/"):e=this.options.suppressEmptyNode?"/":`></${t}`,e},pt.prototype.buildTextValNode=function(t,e,n,i){if(!1!==this.options.cdataPropName&&e===this.options.cdataPropName)return this.indentate(i)+`<![CDATA[${t}]]>`+this.newLine;if(!1!==this.options.commentPropName&&e===this.options.commentPropName)return this.indentate(i)+`\x3c!--${t}--\x3e`+this.newLine;if("?"===e[0])return this.indentate(i)+"<"+e+n+"?"+this.tagEndChar;{let s=this.options.tagValueProcessor(e,t);return s=this.replaceEntitiesValue(s),""===s?this.indentate(i)+"<"+e+n+this.closeTag(e)+this.tagEndChar:this.indentate(i)+"<"+e+n+">"+s+"</"+e+this.tagEndChar}},pt.prototype.replaceEntitiesValue=function(t){if(t&&t.length>0&&this.options.processEntities)for(let e=0;e<this.options.entities.length;e++){const n=this.options.entities[e];t=t.replace(n.regex,n.val)}return t};const xt={validate:a};module.exports=e})();
@@ -27148,7 +27167,7 @@ exports.fromJSON = fromJSON;
 /******/ 	// startup
 /******/ 	// Load entry module and return exports
 /******/ 	// This entry module is referenced by other modules so it can't be inlined
-/******/ 	var __webpack_exports__ = __nccwpck_require__(6136);
+/******/ 	var __webpack_exports__ = __nccwpck_require__(1738);
 /******/ 	module.exports = __webpack_exports__;
 /******/
 /******/ })()

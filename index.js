@@ -5,7 +5,6 @@ const { installFetchPolyfill } = require('./src/util/fetchPolyfill');
 // OIDC SDK 会回退 require('undici') 导致 "Cannot find module 'undici'"。
 installFetchPolyfill();
 
-const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -58,17 +57,37 @@ function setOutput(key, value) {
   console.log(`[OUTPUT] ${key}=${value}`);
 }
 
-function execCapture(cmd) {
-  try {
-    return execSync(cmd, { encoding: 'utf-8', shell: '/bin/bash' }).trim();
-  } catch (e) {
-    return '';
+/**
+ * 在 root 下查找 .git 目录，返回首个命中的 .git 路径（无则 null）。
+ * 等价于 `find <root> -maxdepth 3 -type d -name ".git"`，改用 Node fs 递归实现，
+ * workspace 路径不再拼入 shell 命令（Ref issue #16/#20 命令注入整改）。
+ */
+function findGitDir(root, maxDepth = 3) {
+  let dirs = [root];
+  for (let depth = 0; depth < maxDepth && dirs.length > 0; depth++) {
+    const next = [];
+    for (const dir of dirs) {
+      let entries;
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch (e) {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const full = path.join(dir, entry.name);
+        if (entry.name === '.git') return full;
+        next.push(full);
+      }
+    }
+    dirs = next;
   }
+  return null;
 }
 
 /** 解析仓库根目录：优先取 workspace 下 git 仓库根，兜底 workspace 本身 */
 function resolveRepoRoot(workspace) {
-  const gitDir = execCapture(`find ${workspace} -maxdepth 3 -name ".git" -type d 2>/dev/null | head -1`);
+  const gitDir = findGitDir(workspace);
   if (gitDir) {
     console.log(`[INFO] 仓库根目录（git 根）: ${path.dirname(gitDir)}`);
     return path.dirname(gitDir);
@@ -199,7 +218,7 @@ async function run() {
   setOutput('result', 'success');
 }
 
-module.exports = { run };
+module.exports = { run, findGitDir, resolveRepoRoot };
 
 if (require.main === module) {
   run().catch((err) => {
