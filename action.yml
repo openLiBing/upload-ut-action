@@ -1,16 +1,16 @@
 name: "upload-ut-action"
-version: 1.0.0
+version: 1.0.1
 author: "openLiBing"
 description: "解析多种单元测试覆盖率报告（jacoco / coverage.py / go test / gcov+llvm-cov / c8 / cargo-llvm-cov）为标准 JSON，上传 OBS 并回调 OpenLibing coderepo（OIDC 认证，SDK 自包含换证，无需 huaweicloud-oidc-auth 插件）"
 
 inputs:
-  report_dir:
-    description: "覆盖率报告路径：单个文件或目录（目录递归扫描），逗号分隔支持多值。自动识别 jacoco.xml / coverage.json(coverage.py) / coverage.out(go test) / .gcov / lcov(.lcov/.info) / coverage-final.json(c8) / llvm-cov export(.json)"
+  report_path:
+    description: "覆盖率报告路径：单个文件、目录（目录递归扫描）或逗号分隔的多个路径。自动识别 jacoco.xml / coverage.json(coverage.py) / coverage.out(go test) / .gcov / lcov(.lcov/.info) / coverage-final.json(c8) / llvm-cov export(.json)"
     required: true
     default: ""
     layout:
       type: "input"
-      label: "覆盖率报告路径（文件/目录）"
+      label: "覆盖率报告路径（文件/目录，逗号分隔多值）"
       extend_prop:
         visible_conditions: []
         disabled_conditions: []

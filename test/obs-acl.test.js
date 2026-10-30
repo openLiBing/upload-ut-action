@@ -44,7 +44,7 @@ require.cache[oidcId] = {
 
 const { run } = require('../index');
 
-const ENV_KEYS = ['INPUT_OBS_ACL', 'INPUT_REPORT_DIR', 'WORKSPACE'];
+const ENV_KEYS = ['INPUT_OBS_ACL', 'INPUT_REPORT_PATH', 'WORKSPACE'];
 const savedEnv = {};
 
 test.before(() => {
@@ -60,25 +60,25 @@ test.after(() => {
 
 test('obs_acl 非法值提前抛错（P0：obsAcl 未定义回归）', async () => {
   process.env.INPUT_OBS_ACL = 'authenticated-read';
-  process.env.INPUT_REPORT_DIR = '';
+  process.env.INPUT_REPORT_PATH = '';
   await assert.rejects(run(), (err) => err.message.includes('obs_acl 参数非法') && err.message.includes('authenticated-read'));
 });
 
 test('obs_acl 空值缺省 public-read 不抛错', async () => {
   process.env.INPUT_OBS_ACL = '';
-  process.env.INPUT_REPORT_DIR = 'definitely-not-exists-path';
+  process.env.INPUT_REPORT_PATH = 'definitely-not-exists-path';
   await run(); // 无报告 → 正常返回，不 exit
 });
 
 test('obs_acl=private 合法值通过白名单', async () => {
   process.env.INPUT_OBS_ACL = 'private';
-  process.env.INPUT_REPORT_DIR = 'definitely-not-exists-path';
+  process.env.INPUT_REPORT_PATH = 'definitely-not-exists-path';
   await run();
 });
 
 test('obs_acl 大小写不敏感（PUBLIC-READ 归一化）', async () => {
   process.env.INPUT_OBS_ACL = 'PUBLIC-READ';
-  process.env.INPUT_REPORT_DIR = 'definitely-not-exists-path';
+  process.env.INPUT_REPORT_PATH = 'definitely-not-exists-path';
   await run();
 });
 
