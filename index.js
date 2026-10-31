@@ -130,7 +130,7 @@ function resolveRegion() {
 // ---------- 主流程 ----------
 
 async function run() {
-  const reportDir = getInput('report_dir');
+  const reportPath = getInput('report_path');
   const envType = (getInput('env_type') || 'prod').toLowerCase();
   const region = resolveRegion();
   // obs_acl：OBS 对象 ACL（Ref #1）。白名单校验后透传 ObsUploader；
@@ -152,14 +152,14 @@ async function run() {
   console.log(`[INFO] region: ${region}`);
   console.log(`[INFO] 仓库: ${gitUrl}，分支: ${branchName || '(未识别)'}，流水线: ${pipelineRunId || 'manual'}`);
 
-  if (!reportDir) {
-    console.log('[ERROR] 必须配置 report_dir（覆盖率报告文件或目录，逗号分隔多值）');
+  if (!reportPath) {
+    console.log('[ERROR] 必须配置 report_path（覆盖率报告文件或目录，逗号分隔多值）');
     setOutput('result', 'failed');
     process.exit(1);
   }
 
   console.log('\n===== [1] 扫描报告 =====');
-  const inputs = reportDir.split(',').map((s) => s.trim()).filter(Boolean);
+  const inputs = reportPath.split(',').map((s) => s.trim()).filter(Boolean);
   const reports = ReportScanner.scan(inputs);
   if (reports.length === 0) {
     console.log('[WARN] 未识别到任何覆盖率报告（支持 jacoco.xml / coverage.json / coverage.out / .gcov / lcov / coverage-final.json / llvm-cov export）');
