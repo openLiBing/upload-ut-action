@@ -36,7 +36,7 @@ jobs:
       - run: python -m pip install diff-cover
       - run: npx --yes c8@10 --all --include='src/**/*.js' --include='index.js' --reporter=text --reporter=cobertura npm test
       - name: Check changed-line coverage
-        if: ${{ atomgit.event_name == 'pull_request' || atomgit.event_name == 'MR' }}
+        if: ${{ contains('pull_request_target,MR', atomgit.event_name) }}
         run: |
           test -n "$ATOMGIT_BASE_REF"
           git fetch origin "+refs/heads/$ATOMGIT_BASE_REF:refs/remotes/origin/$ATOMGIT_BASE_REF"
