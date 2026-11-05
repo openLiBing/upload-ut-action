@@ -1,0 +1,23 @@
+name: build
+
+on:
+  pull_request:
+    branches: ["*"]
+  workflow_dispatch:
+
+permissions:
+  repository: read
+
+jobs:
+  build:
+    runs-on: ["self-hosted", "region=overseas"]
+    steps:
+      - uses: checkout
+        with:
+          ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.event.pull_request.head.sha || atomgit.sha }}
+          fetch-depth: 0
+      - uses: setup-node
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run build
