@@ -1,0 +1,56 @@
+name: ut-coverage
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - "*"
+  pull_request_comment:
+    types: [created]
+    comments: ["/ut"]
+    branches:
+      - "*"
+
+permissions:
+  repository: read
+
+jobs:
+  ut:
+    runs-on: ["self-hosted", "region=cn"]
+    steps:
+      - name: checkout
+        uses: checkout
+        with:
+          ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.event.pull_request.head.sha || atomgit.sha }}
+          allow-unsafe-pr-checkout: true # 关闭 fork PR 检出拦截，避免流水线在 fork PR 场景失败
+          fetch-depth: 0
+      # setup 插件在当前执行机上对 /opt/tools 无写权限时会安装失败，此处临时规避
+      - name: bootstrap tool cache dir
+        run: |
+          if [ ! -d /opt/tools/cache ] || [ ! -w /opt/tools/cache ]; then
+            sudo mkdir -p /opt/tools/cache
+            sudo chown -R "$(id -u):$(id -g)" /opt/tools
+          fi
+      - name: setup-node
+        uses: setup-node
+        with:
+          node-version: 22
+      - name: npm ci
+        run: npm ci
+      - name: setup-python
+        uses: setup-python
+        with:
+          python-version: "3.14"
+      - name: install diff-cover
+        run: python -m pip install diff-cover
+      - name: run unit tests
+        run: npx --yes c8@10 --all --include='src/**/*.js' --include='index.js' --reporter=text --reporter=cobertura npm test
+      - name: Check changed-line coverage
+        if: ${{ contains('pull_request_target,pull_request_comment,MR,Note', atomgit.event_name) }}
+        run: |
+          test -n "$ATOMGIT_BASE_REF"
+          git fetch origin "+refs/heads/$ATOMGIT_BASE_REF:refs/remotes/origin/$ATOMGIT_BASE_REF"
+          diff-cover coverage/cobertura-coverage.xml --compare-branch "origin/$ATOMGIT_BASE_REF" --fail-under "${UT_INCREMENTAL_LINE_COVERAGE_THRESHOLD:-80}"
