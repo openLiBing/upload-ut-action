@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   ut:
-    runs-on: ["self-hosted", "region=overseas"]
+    runs-on: ["self-hosted", "region=cn"]
     steps:
       - name: checkout
         uses: checkout
