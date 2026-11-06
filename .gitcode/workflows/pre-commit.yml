@@ -25,7 +25,7 @@ stages:
       pr-label-running:
         name: pr-label-running
         if: ${{ contains('pull_request_target,pull_request_comment,MR,Note', atomgit.event_name) }}
-        runs-on: ["self-hosted", "region=cn"]
+        runs-on: ["self-hosted"]
         steps:
           - name: pr-label-running
             uses: openlibing/pr-label-action@v1.0.0
@@ -39,7 +39,7 @@ stages:
     jobs:
       pre-commit:
         name: pre-commit
-        runs-on: ["self-hosted", "region=overseas"]
+        runs-on: ["self-hosted"]
         steps:
           - name: Checkout repository
             uses: checkout
@@ -75,7 +75,7 @@ post:
     label-pr:
       name: pr-label-complete
       if: ${{ contains('pull_request_target,pull_request_comment,MR,Note', atomgit.event_name) }}
-      runs-on: ["self-hosted", "region=cn"]
+      runs-on: ["self-hosted"]
       steps:
         - name: set pr label complete
           uses: openlibing/pr-label-action@v1.0.0

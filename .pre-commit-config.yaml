@@ -16,7 +16,7 @@ repos:
       - id: detect-private-key # 检测私钥/敏感信息泄露
 
   # ===================== 敏感信息扫描 =====================
-  - repo: https://gitcode.com/GitHub_Trending/gi/gitleaks
+  - repo: https://gitcode.com/openlibing/pre-commit-hook-gitleaks
     rev: v8.30.1
     hooks:
       - id: gitleaks
