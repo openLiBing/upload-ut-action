@@ -25,7 +25,6 @@ jobs:
         uses: checkout
         with:
           ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.event.pull_request.head.sha || atomgit.sha }}
-          allow-unsafe-pr-checkout: true # 关闭 fork PR 检出拦截，避免流水线在 fork PR 场景失败
           fetch-depth: 0
       # setup 插件在当前执行机上对 /opt/tools 无写权限时会安装失败，此处临时规避
       - name: bootstrap tool cache dir
