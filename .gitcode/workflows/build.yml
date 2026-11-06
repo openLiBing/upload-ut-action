@@ -21,13 +21,17 @@ jobs:
   build:
     runs-on: ["self-hosted", "region=overseas"]
     steps:
-      - uses: checkout
+      - name: checkout
+        uses: checkout
         with:
           ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.event.pull_request.head.sha || atomgit.sha }}
           allow-unsafe-pr-checkout: true # 关闭 fork PR 检出拦截，避免流水线在 fork PR 场景失败
           fetch-depth: 0
-      - uses: setup-node
+      - name: setup-node
+        uses: setup-node
         with:
           node-version: 22
-      - run: npm ci
-      - run: npm run build
+      - name: npm ci
+        run: npm ci
+      - name: build
+        run: npm run build
