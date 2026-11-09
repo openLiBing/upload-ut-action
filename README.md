@@ -5,16 +5,18 @@
 ## 功能特性
 
 - 支持 6 种主流覆盖率报告：JaCoCo / coverage.py / Go test / gcov+llvm-cov / c8 / cargo-llvm-cov
-- 报告格式自动识别，`report_dir` 传文件或目录均可，目录递归扫描，逗号分隔支持多值
+- 报告格式自动识别，`report_path` 传文件或目录均可，目录递归扫描，逗号分隔支持多值
 - 内置华为云凭证换取能力，无需额外安装认证插件
 
 ## 输入参数
 
-| 参数         | 必填 | 默认值           | 说明                                         |
-| ------------ | ---- | ---------------- | -------------------------------------------- |
-| `report_dir` | 是   | -                | 覆盖率报告路径，文件或目录，逗号分隔可传多个 |
-| `env_type`   | 否   | `prod`           | 环境类型：`prod`（正式）/ `beta`（测试）     |
-| `region`     | 否   | `cn-southwest-2` | 华为云区域                                   |
+| 参数          | 必填 | 默认值           | 说明                                         |
+| ------------- | ---- | ---------------- | -------------------------------------------- |
+| `report_path` | 是   | -                | 覆盖率报告路径，文件或目录，逗号分隔可传多个 |
+| `env_type`    | 否   | `prod`           | 环境类型：`prod`（正式）/ `beta`（测试）     |
+| `region`      | 否   | `cn-southwest-2` | 华为云区域                                   |
+
+> v1.0.1 起 `report_dir` 重命名为 `report_path`，旧参数名不再生效，升级时需同步修改工作流。
 
 ## 输出
 
@@ -57,14 +59,14 @@ jobs:
         run: |
           go test ./... -coverprofile=coverage.out
       - name: Upload UT coverage
-        uses: openlibing/upload-ut-action@v1.0.0
+        uses: openlibing/upload-ut-action@v1.0.1
         with:
-          report_dir: ./coverage.out
+          report_path: ./coverage.out
 ```
 
 说明：
 
-- `report_dir` 指向报告生成位置即可，仓库、分支、流水线等信息由平台自动注入，无需手动传入
+- `report_path` 指向报告生成位置即可，仓库、分支、流水线等信息由平台自动注入，无需手动传入
 - 未识别到任何报告时 step 仍以成功结束（仅记录告警），不影响流水线通过
 
 ### 支持的报告格式
@@ -82,7 +84,7 @@ jobs:
 
 ## 工作原理
 
-1. 扫描 `report_dir` 定位报告并识别格式
+1. 扫描 `report_path` 定位报告并识别格式
 2. 解析报告、转换为平台标准 JSON：行覆盖率必报，分支/方法/类覆盖率在工具支持时才上报
 3. 上传数据并回调平台入库
 
