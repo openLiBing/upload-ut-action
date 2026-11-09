@@ -40,34 +40,21 @@ require.cache[oidcId] = {
   exports: fakeOidc, children: [],
 };
 
-// ============ Part 1：index.js 不再读取 obs_acl 输入 ============
+// ============ Part 1：index.js / action.yml 不再有 obs_acl 输入 ============
 
-const { run } = require('../index');
+const fs = require('node:fs');
+const path = require('node:path');
 
-const ENV_KEYS = ['INPUT_OBS_ACL', 'INPUT_REPORT_DIR', 'WORKSPACE'];
-const savedEnv = {};
+const repoRoot = path.join(__dirname, '..');
 
-test.before(() => {
-  for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
+test('index.js 不再读取 obs_acl 输入', () => {
+  const src = fs.readFileSync(path.join(repoRoot, 'index.js'), 'utf8');
+  assert.ok(!/obs_acl/i.test(src), 'index.js 不应残留 obs_acl 逻辑');
 });
 
-test.after(() => {
-  for (const k of ENV_KEYS) {
-    if (savedEnv[k] === undefined) delete process.env[k];
-    else process.env[k] = savedEnv[k];
-  }
-});
-
-test('残留 obs_acl 输入不影响运行（参数已移除）', async () => {
-  process.env.INPUT_OBS_ACL = 'authenticated-read';
-  process.env.INPUT_REPORT_DIR = 'definitely-not-exists-path';
-  await run(); // 无报告 → 正常返回，不因 obs_acl 抛错
-});
-
-test('未设置 obs_acl 正常运行', async () => {
-  delete process.env.INPUT_OBS_ACL;
-  process.env.INPUT_REPORT_DIR = 'definitely-not-exists-path';
-  await run();
+test('action.yml 不再声明 obs_acl 输入', () => {
+  const src = fs.readFileSync(path.join(repoRoot, 'action.yml'), 'utf8');
+  assert.ok(!/obs_acl/i.test(src), 'action.yml 不应声明 obs_acl 输入');
 });
 
 // ============ Part 2：OBS 对象固定私有（不设置 ACL） ============
