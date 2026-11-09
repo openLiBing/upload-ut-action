@@ -133,13 +133,6 @@ async function run() {
   const reportPath = getInput('report_path');
   const envType = (getInput('env_type') || 'prod').toLowerCase();
   const region = resolveRegion();
-  // obs_acl：OBS 对象 ACL（Ref #1）。白名单校验后透传 ObsUploader；
-  // 缺省 public-read 与原行为一致（后端当前匿名 GET 下载依赖该默认值）
-  const obsAclRaw = (getInput('obs_acl') || 'public-read').trim().toLowerCase();
-  if (obsAclRaw !== 'public-read' && obsAclRaw !== 'private') {
-    throw new Error(`obs_acl 参数非法（${obsAclRaw}）：仅允许 public-read / private`);
-  }
-  const obsAcl = obsAclRaw;
 
   const gitUrl = resolveGitUrl();
   const branchName = resolveBranch();
@@ -204,7 +197,7 @@ async function run() {
     await ObsUploader.uploadAndNotify(
       standardJson,
       { repoName, pipelineRunId, gitUrl, branchName },
-      { envType, obsAcl }
+      { envType }
     );
   } catch (err) {
     console.log(`[ERROR] 上传/回调链路失败: ${err.message}`);
