@@ -15,7 +15,12 @@ on:
       - "*"
 
 permissions:
-  repository: read
+  repository: read # checkout 插件最低权限要求
+  id-token: write # upload-ut-action OIDC 上传需要
+
+env:
+  # PR 触发场景标记：覆盖率上报仅 push/手动触发执行
+  IS_PR_EVENT: ${{ atomgit.event_name != '' && contains('pull_request,pull_request_comment,MR,Note', atomgit.event_name) }}
 
 jobs:
   ut:
@@ -46,7 +51,13 @@ jobs:
       - name: install diff-cover
         run: python -m pip install diff-cover
       - name: run unit tests
-        run: npx --yes c8@10 --all --include='src/**/*.js' --include='index.js' --reporter=text --reporter=cobertura npm test
+        run: npx --yes c8@10 --all --include='src/**/*.js' --include='index.js' --reporter=text --reporter=json --reporter=cobertura npm test
+      # 将ut报告上传至openlibing平台运营，插件自动识别 c8 格式
+      - name: upload ut report to openlibing
+        if: ${{ always() && env.IS_PR_EVENT != 'true' }} # 覆盖率上报仅 push/手动触发执行
+        uses: openlibing/upload-ut-action@v1.0.0
+        with:
+          report_dir: coverage/ # c8 默认输出路径
       - name: Check changed-line coverage
         if: ${{ contains('pull_request_target,pull_request_comment,MR,Note', atomgit.event_name) }}
         run: |
