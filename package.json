@@ -1,6 +1,6 @@
 {
   "name": "upload-ut-action",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "解析多种单元测试覆盖率报告（jacoco / coverage.py / go test / gcov+llvm-cov / c8 / cargo-llvm-cov），转换为标准 JSON 上传 OpenLibing 平台（OIDC 认证 + OBS 上传 + APIG 回调）",
   "main": "index.js",
   "scripts": {
