@@ -17,6 +17,7 @@ const C8Parser = require('./src/parser/C8Parser');
 const CargoLlvmCovParser = require('./src/parser/CargoLlvmCovParser');
 const CoverageNormalizer = require('./src/normalizer/CoverageNormalizer');
 const ObsUploader = require('./src/obs/ObsUploader');
+const { detectPlatform } = require('./src/util/platform');
 
 const PARSER_MAP = {
   jacoco: JacocoParser,
@@ -37,9 +38,10 @@ function getInput(name) {
 }
 
 function setOutput(key, value) {
-  const stepOutput = process.env.STEP_OUTPUT;
+  // GitHub 使用 GITHUB_OUTPUT，GitCode 使用 STEP_OUTPUT；两者都不存在时仅告警
+  const stepOutput = process.env.GITHUB_OUTPUT || process.env.STEP_OUTPUT;
   if (!stepOutput) {
-    console.log(`[WARN] STEP_OUTPUT env not set, skip output: ${key}=${value}`);
+    console.log(`[WARN] GITHUB_OUTPUT/STEP_OUTPUT env not set, skip output: ${key}=${value}`);
     return;
   }
   let filePath;
@@ -96,18 +98,70 @@ function resolveRepoRoot(workspace) {
   return workspace;
 }
 
-/** 回调分支：MR 事件用目标分支（ATOMGIT_HEAD_REF），其他事件用当前 ref */
-function resolveBranch() {
-  const eventName = (process.env.ATOMGIT_EVENT_NAME || '').toLowerCase();
-  return eventName === 'mr'
-    ? (process.env.ATOMGIT_HEAD_REF || '')
-    : (process.env.ATOMGIT_REF_NAME || '');
+/** 读取 GitHub 事件负载（GITHUB_EVENT_PATH），读取或解析失败返回 null */
+function readGithubEventPayload(env) {
+  const eventPath = env.GITHUB_EVENT_PATH;
+  if (!eventPath) return null;
+  try {
+    return JSON.parse(fs.readFileSync(eventPath, 'utf-8'));
+  } catch (e) {
+    return null;
+  }
 }
 
-/** 构造仓库 URL（去掉 .git 后缀） */
-function resolveGitUrl() {
-  const raw = (process.env.ATOMGIT_REPOSITORY_URL || '').trim();
-  return raw ? raw.replace(/\.git$/, '') : '';
+/**
+ * GitHub 提交 SHA：PR 事件上报目标分支，commitId 取 pull_request.base.sha（目标分支提交），
+ * 与 GITHUB_BASE_REF 保持自洽；事件文件缺失时回退 GITHUB_SHA。
+ */
+function resolveGithubCommitId(env, eventName) {
+  if (eventName === 'pull_request' || eventName === 'pull_request_target') {
+    const payload = readGithubEventPayload(env);
+    const baseSha = payload && payload.pull_request && payload.pull_request.base
+      ? payload.pull_request.base.sha
+      : '';
+    if (baseSha) return baseSha;
+    console.log('[WARN] 未能从 GITHUB_EVENT_PATH 解析 pull_request.base.sha，commitId 回退 GITHUB_SHA');
+  }
+  return env.GITHUB_SHA || '';
+}
+
+/**
+ * 一次性解析平台上下文：仅当 GITHUB_ACTIONS=true 且无 GitCode 关键上下文时按 GitHub 处理，
+ * 其余按 GitCode Actions 处理。GitHub 只读 GITHUB_*，GitCode 只读 ATOMGIT_*，不跨平台混用。
+ * GitHub PR 事件上报目标分支（GITHUB_BASE_REF + pull_request.base.sha），GitCode 保持既有行为。
+ */
+function resolvePlatformContext(env = process.env) {
+  const isGithub = detectPlatform(env) === 'github';
+  if (isGithub) {
+    const server = (env.GITHUB_SERVER_URL || '').trim().replace(/\/+$/, '');
+    const repository = (env.GITHUB_REPOSITORY || '').trim();
+    const eventName = (env.GITHUB_EVENT_NAME || '').toLowerCase();
+    const isPullRequest = eventName === 'pull_request' || eventName === 'pull_request_target';
+    return {
+      isGithub,
+      gitUrl: server && repository ? `${server}/${repository}` : '',
+      branchName: isPullRequest ? (env.GITHUB_BASE_REF || '') : (env.GITHUB_REF_NAME || ''),
+      pipelineRunId: env.GITHUB_RUN_ID || '',
+      commitId: resolveGithubCommitId(env, eventName),
+      repoName: repository.split('/').pop() || 'unknown-repo',
+      workspace: env.GITHUB_WORKSPACE || process.cwd(),
+    };
+  }
+
+  const rawUrl = (env.ATOMGIT_REPOSITORY_URL || '').trim();
+  const repository = (env.ATOMGIT_REPOSITORY || env.GIT_REPOSITORY || '').trim();
+  const eventName = (env.ATOMGIT_EVENT_NAME || '').toLowerCase();
+  return {
+    isGithub,
+    gitUrl: rawUrl ? rawUrl.replace(/\.git$/, '') : '',
+    branchName: eventName === 'mr'
+      ? (env.ATOMGIT_HEAD_REF || '')
+      : (env.ATOMGIT_REF_NAME || ''),
+    pipelineRunId: env.ATOMGIT_RUN_ID || '',
+    commitId: env.ATOMGIT_SHA || '',
+    repoName: repository.split('/').pop() || 'unknown-repo',
+    workspace: env.WORKSPACE || process.cwd(),
+  };
 }
 
 function resolveRegion() {
@@ -141,13 +195,11 @@ async function run() {
   }
   const obsAcl = obsAclRaw;
 
-  const gitUrl = resolveGitUrl();
-  const branchName = resolveBranch();
-  const pipelineRunId = process.env.ATOMGIT_RUN_ID || '';
-  const commitId = process.env.ATOMGIT_SHA || '';
-  const workspace = process.env.WORKSPACE || process.cwd();
+  const platform = resolvePlatformContext();
+  const { gitUrl, branchName, pipelineRunId, commitId, repoName, workspace } = platform;
 
   console.log('===== upload-ut-action 启动 =====');
+  console.log(`[INFO] 运行平台: ${platform.isGithub ? 'GitHub Actions' : 'GitCode Actions'}`);
   console.log(`[INFO] 环境类型: ${envType === 'beta' ? 'beta (测试环境)' : 'prod (正式环境)'}`);
   console.log(`[INFO] region: ${region}`);
   console.log(`[INFO] 仓库: ${gitUrl}，分支: ${branchName || '(未识别)'}，流水线: ${pipelineRunId || 'manual'}`);
@@ -199,7 +251,6 @@ async function run() {
   console.log(`[INFO] 可缺省指标: ${['branchCoverage', 'methodCoverage', 'classCoverage'].filter((k) => standardJson[k] != null).join(', ') || '无'}`);
 
   console.log('\n===== [3] OIDC 换证 + OBS 上传 + APIG 回调 =====');
-  const repoName = (process.env.ATOMGIT_REPOSITORY || process.env.GIT_REPOSITORY || '').split('/').pop() || 'unknown-repo';
   try {
     await ObsUploader.uploadAndNotify(
       standardJson,
@@ -218,7 +269,7 @@ async function run() {
   setOutput('result', 'success');
 }
 
-module.exports = { run, findGitDir, resolveRepoRoot };
+module.exports = { run, findGitDir, resolveRepoRoot, resolvePlatformContext };
 
 if (require.main === module) {
   run().catch((err) => {

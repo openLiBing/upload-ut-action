@@ -5,6 +5,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const ObsClient = require('esdk-obs-nodejs');
+const { detectPlatform } = require('../util/platform');
 
 /**
  * OBS 上传 + APIG 回调（OIDC 免静态凭证）。
@@ -24,6 +25,13 @@ try {
   console.log('[ERROR] @openlibing/huaweicloud-oidc-client 加载失败，请重新构建 dist 后重试');
 }
 
+// 兼容层 runner 可能同时注入 GITHUB_ACTIONS 与 ATOMGIT_*：按 GitCode 处理，
+// 并覆盖 SDK 基于 GITHUB_ACTIONS 的自动选择，避免存量 GitCode 换证失败。
+if (detectPlatform() !== 'github' && process.env.GITHUB_ACTIONS === 'true' && configure) {
+  configure({ oidcProviderName: 'GitCodeActions', agencyName: 'gitcode-actions' });
+  console.log('[WARN] 检测到 GITHUB_ACTIONS=true 且存在 ATOMGIT_* 上下文，按 GitCode 处理并覆盖 OIDC 提供商');
+}
+
 // ---------- 常量 ----------
 
 const APIG_SIGN_REGION = 'cn-southwest-2'; // APIG V11 签名区域
@@ -36,8 +44,16 @@ const OIDC_PROD_BASE = process.env.OPENLIBING_APIG_PROD_BASE || 'https://apig.op
 // beta.apig.openlibing.com 证书未绑定，临时使用已发布 /action-api 的 APIG 域名 // gitleaks:allow 功能必需的业务 API 默认回退地址（beta），运行时优先环境变量注入
 const OIDC_BETA_BASE = process.env.OPENLIBING_APIG_BETA_BASE || 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com';
 
-const OBS_BUCKET = 'openlibing-gitcode-action';
-const OBS_READ_ENDPOINT = 'https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com';
+// CI 平台判定：GITHUB_ACTIONS=true 且无 GitCode 关键上下文时为 GitHub，其余按 GitCode 处理
+const IS_GITHUB = detectPlatform() === 'github';
+
+/** OBS 桶按 CI 平台隔离：GitHub 与 GitCode 使用独立桶，对象 key 结构保持一致 */
+function selectObsBucket(isGithub) {
+  return isGithub ? 'openlibing-github-action' : 'openlibing-gitcode-action';
+}
+
+const OBS_BUCKET = selectObsBucket(IS_GITHUB);
+const OBS_READ_ENDPOINT = `https://${OBS_BUCKET}.obs.cn-southwest-2.myhuaweicloud.com`;
 const OBS_PREFIX = 'ut-coverage-action';
 const OBS_OBJECT_NAME = 'ut-coverage.json';
 
@@ -190,6 +206,7 @@ async function uploadAndNotify(standardJson, opts, { envType = 'prod', obsAcl = 
   const callbackBase = isBeta ? OIDC_BETA_BASE : OIDC_PROD_BASE;
 
   console.log(`[INFO] 认证模式: OIDC 联邦认证（SDK 自包含换证）`);
+  console.log(`[INFO] 运行平台: ${IS_GITHUB ? 'GitHub Actions' : 'GitCode Actions'}，OBS 桶: ${OBS_BUCKET}`);
   console.log(`[INFO] 回调地址: ${callbackBase}${OIDC_API_PREFIX}${CALLBACK_PATH}`);
   console.log(`[INFO] OBS 对象 ACL: ${obsAcl}${obsAcl === 'public-read' ? '（默认；后端支持带凭证下载后建议切换 private）' : ''}`);
 
@@ -228,6 +245,7 @@ async function uploadAndNotify(standardJson, opts, { envType = 'prod', obsAcl = 
 
 module.exports = {
   uploadAndNotify,
+  selectObsBucket,
   buildObsKey,
   getOidcCredentials,
   uploadJson,

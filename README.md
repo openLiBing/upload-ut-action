@@ -1,12 +1,13 @@
 # upload-ut-action
 
-一个 GitCode（AtomGit）平台的 Action，用于扫描单元测试（UT）覆盖率报告，自动识别并解析主流工具的覆盖率格式，转换为平台标准数据后上报 OpenLibing，在平台上集中查看各项目的 UT 覆盖率。
+一个同时支持 GitCode（AtomGit）与 GitHub Actions 的 Action，用于扫描单元测试（UT）覆盖率报告，自动识别并解析主流工具的覆盖率格式，转换为平台标准数据后上报 OpenLibing，在平台上集中查看各项目的 UT 覆盖率。
 
 ## 功能特性
 
 - 支持 6 种主流覆盖率报告：JaCoCo / coverage.py / Go test / gcov+llvm-cov / c8 / cargo-llvm-cov
 - 报告格式自动识别，`report_path` 传文件或目录均可，目录递归扫描，逗号分隔支持多值
 - 内置华为云凭证换取能力，无需额外安装认证插件
+- 单份代码同时适配 GitCode Actions 与 GitHub Actions，按 `GITHUB_ACTIONS` 自动识别运行平台并选择对应的 OIDC 身份提供商与 OBS 桶
 
 ## 输入参数
 
@@ -15,6 +16,7 @@
 | `report_path` | 是   | -                | 覆盖率报告路径，文件或目录，逗号分隔可传多个 |
 | `env_type`    | 否   | `prod`           | 环境类型：`prod`（正式）/ `beta`（测试）     |
 | `region`      | 否   | `cn-southwest-2` | 华为云区域                                   |
+| `obs_acl`     | 否   | `public-read`    | OBS 对象 ACL：`public-read` / `private`      |
 
 > v1.0.1 起 `report_dir` 重命名为 `report_path`，旧参数名不再生效，升级时需同步修改工作流。
 
@@ -26,18 +28,23 @@
 
 ## 前置条件
 
-工作流需要声明 OIDC 权限，用于华为云凭证换取：
+工作流需要声明 OIDC 权限，用于华为云凭证换取（GitCode / GitHub 相同）：
 
 ```yaml
 permissions:
   id-token: write # 必需
 ```
 
+GitHub Actions 还需满足：
+
+- Action 已发布到 GitHub 仓库，工作流通过 `<owner>/upload-ut-action@<tag>` 引用；
+- 华为云 IAM 已注册 `GitHubActions` 身份提供商与 `github-actions` 信任委托（由平台运维配置）。
+
 ## 快速开始
 
-在 GitCode 项目的 `.gitcode/workflows/` 目录下创建工作流文件，例如 `ut-coverage.yml`。
+### GitCode Actions
 
-### 典型场景：PR 流水线上报覆盖率
+在 GitCode 项目的 `.gitcode/workflows/` 目录下创建工作流文件，例如 `ut-coverage.yml`：
 
 ```yaml
 name: UT Coverage
@@ -59,7 +66,36 @@ jobs:
         run: |
           go test ./... -coverprofile=coverage.out
       - name: Upload UT coverage
-        uses: openlibing/upload-ut-action@v1.0.1
+        uses: openlibing/upload-ut-action@v1.0.2
+        with:
+          report_path: ./coverage.out
+```
+
+### GitHub Actions
+
+在 GitHub 项目的 `.github/workflows/` 目录下创建工作流文件，例如 `ut-coverage.yml`：
+
+```yaml
+name: UT Coverage
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write # 必需：OIDC 换证
+
+jobs:
+  test:
+    name: Test with coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests with coverage
+        run: |
+          go test ./... -coverprofile=coverage.out
+      - name: Upload UT coverage
+        uses: openlibing/upload-ut-action@v1.0.2 # 按 GitHub 实际发布地址替换
         with:
           report_path: ./coverage.out
 ```
@@ -67,6 +103,8 @@ jobs:
 说明：
 
 - `report_path` 指向报告生成位置即可，仓库、分支、流水线等信息由平台自动注入，无需手动传入
+- PR 事件默认按目标分支归属数据；GitHub 取 `GITHUB_BASE_REF` + `pull_request.base.sha`，GitCode 保持既有取值行为
+- GitHub 上报到 `openlibing-github-action` 桶，GitCode 上报到 `openlibing-gitcode-action` 桶，对象 key 结构一致
 - 未识别到任何报告时 step 仍以成功结束（仅记录告警），不影响流水线通过
 
 ### 支持的报告格式
@@ -84,9 +122,10 @@ jobs:
 
 ## 工作原理
 
-1. 扫描 `report_path` 定位报告并识别格式
-2. 解析报告、转换为平台标准 JSON：行覆盖率必报，分支/方法/类覆盖率在工具支持时才上报
-3. 上传数据并回调平台入库
+1. 按 `GITHUB_ACTIONS` 识别运行平台，读取对应平台（GitHub / GitCode）的仓库、分支、运行 ID 等上下文
+2. 扫描 `report_path` 定位报告并识别格式
+3. 解析报告、转换为平台标准 JSON：行覆盖率必报，分支/方法/类覆盖率在工具支持时才上报
+4. 使用 OIDC 临时凭证上传到平台对应 OBS 桶，并回调 OpenLibing 入库
 
 ## 本地开发
 
@@ -129,3 +168,5 @@ upload-ut-action/
 - [触发事件](https://docs.gitcode.com/docs/help/home/org_project/pipeline/syntax-reference/trigger-events/)
 - [变量（ATOMGIT_* 系统变量）](https://docs.gitcode.com/docs/help/home/org_project/pipeline/syntax-reference/variables)
 - [Runner 镜像与预装工具](https://docs.gitcode.com/docs/help/home/org_project/pipeline/syntax-reference/runner-images-tools)
+- [GitHub Actions 文档](https://docs.github.com/en/actions)
+- [GitHub Actions OIDC 权限](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect)
