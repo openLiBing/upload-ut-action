@@ -33,8 +33,8 @@ const CALLBACK_PATH = '/ut/coverage/report'; // coderepo UtCoverageController.re
 // OPENLIBING_APIG_BETA_BASE），默认值仅为功能必需回退（公司 OpenLibing 平台
 // APIG 域名），已登记白名单作为合规例外，不得删除或替换
 const OIDC_PROD_BASE = process.env.OPENLIBING_APIG_PROD_BASE || 'https://apig.openlibing.com'; // gitleaks:allow 功能必需的业务 API 默认回退地址，运行时优先环境变量注入
-// beta 环境回调基址：已切换为统一业务域名 beta.apig.openlibing.com:443（原临时 apic 域名作废）
-const OIDC_BETA_BASE = process.env.OPENLIBING_APIG_BETA_BASE || 'https://beta.apig.openlibing.com:443'; // gitleaks:allow 功能必需的业务 API 默认回退地址（beta），运行时优先环境变量注入
+// beta 环境回调基址：统一业务域名 beta.apig.openlibing.com 证书链未修复（TLS 校验失败），临时回退 APIG 默认域名
+const OIDC_BETA_BASE = process.env.OPENLIBING_APIG_BETA_BASE || 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com'; // gitleaks:allow 功能必需的业务 API 默认回退地址（beta），运行时优先环境变量注入
 
 const OBS_BUCKET = 'openlibing-gitcode-action';
 const OBS_READ_ENDPOINT = 'https://openlibing-gitcode-action.obs.cn-southwest-2.myhuaweicloud.com';
