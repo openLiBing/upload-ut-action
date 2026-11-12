@@ -29,6 +29,47 @@ test('CoverageNormalizer 单报告组装标准 JSON', () => {
   assert.strictEqual(out.fileDetails[0].filePath, 'com/example/Foo.java');
 });
 
+test('CoverageNormalizer 元数据补齐：runNumber/pipelineName 透传 + detectionCompletedAt 组装时刻打点', () => {
+  const parsed = {
+    tool: 'jacoco',
+    metrics: { lineCoverage: 80, lineCovered: 4, lineTotal: 5 },
+    files: [{ filePath: 'com/example/Foo.java', lineCoverage: 80, lineCovered: 4, lineTotal: 5 }],
+  };
+  const out = CoverageNormalizer.normalize(
+    [parsed],
+    { gitUrl: 'https://gitcode.com/o/r', branchName: 'master', pipelineRunId: '123', commitId: 'abc', runNumber: '83', pipelineName: 'ut-coverage-scan' },
+    ''
+  );
+  assert.strictEqual(out.runNumber, '83');
+  assert.strictEqual(out.pipelineName, 'ut-coverage-scan');
+  // 检测完成时间 = 标准 JSON 组装完成时刻，格式与后端 parseDetectionTime 兼容（空格分隔）
+  assert.match(out.detectionCompletedAt, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  // 元数据区字段完整性：8 个元数据字段 + fileDetails 明细区
+  assert.deepStrictEqual(Object.keys(out), [
+    'gitUrl',
+    'branchName',
+    'pipelineRunId',
+    'runNumber',
+    'pipelineName',
+    'commitId',
+    'lineCoverage',
+    'detectionCompletedAt',
+    'fileDetails',
+  ]);
+});
+
+test('CoverageNormalizer 旧版 meta 缺 runNumber/pipelineName 兜底空串，向后兼容', () => {
+  const parsed = {
+    tool: 'jacoco',
+    metrics: { lineCoverage: 80, lineCovered: 4, lineTotal: 5 },
+    files: [{ filePath: 'com/example/Foo.java', lineCoverage: 80, lineCovered: 4, lineTotal: 5 }],
+  };
+  const out = CoverageNormalizer.normalize([parsed], { gitUrl: '', branchName: '', pipelineRunId: '', commitId: '' }, '');
+  assert.strictEqual(out.runNumber, '');
+  assert.strictEqual(out.pipelineName, '');
+  assert.match(out.detectionCompletedAt, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+});
+
 test('CoverageNormalizer 多报告合并：总体重新求和 + 文件明细拼接', () => {
   const jacoco = {
     tool: 'jacoco',

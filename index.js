@@ -137,6 +137,10 @@ async function run() {
   const gitUrl = resolveGitUrl();
   const branchName = resolveBranch();
   const pipelineRunId = process.env.ATOMGIT_RUN_ID || '';
+  // 流水线运行编号与名称由 GitCode 流水线上下文注入（与 code-metrics-action ciContext.js 同源），
+  // 手动触发等无变量场景兜底空串，后端按未知来源处理
+  const runNumber = process.env.ATOMGIT_RUN_NUMBER || '';
+  const pipelineName = process.env.ATOMGIT_WORKFLOW || '';
   const commitId = process.env.ATOMGIT_SHA || '';
   const workspace = process.env.WORKSPACE || process.cwd();
 
@@ -187,7 +191,12 @@ async function run() {
   }
 
   const repoRoot = resolveRepoRoot(workspace);
-  const standardJson = CoverageNormalizer.normalize(parsedList, { gitUrl, branchName, pipelineRunId, commitId }, repoRoot);
+  const standardJson =
+    CoverageNormalizer.normalize(
+      parsedList,
+      { gitUrl, branchName, pipelineRunId, commitId, runNumber, pipelineName },
+      repoRoot
+    );
   console.log(`[OK] 标准 JSON 组装完成: lineCoverage=${standardJson.lineCoverage}%, fileDetails=${standardJson.fileDetails.length}`);
   console.log(`[INFO] 可缺省指标: ${['branchCoverage', 'methodCoverage', 'classCoverage'].filter((k) => standardJson[k] != null).join(', ') || '无'}`);
 
