@@ -16,7 +16,6 @@
 | `report_path` | 是   | -                | 覆盖率报告路径，文件或目录，逗号分隔可传多个 |
 | `env_type`    | 否   | `prod`           | 环境类型：`prod`（正式）/ `beta`（测试）     |
 | `region`      | 否   | `cn-southwest-2` | 华为云区域                                   |
-| `obs_acl`     | 否   | `public-read`    | OBS 对象 ACL：`public-read` / `private`      |
 
 > v1.0.1 起 `report_dir` 重命名为 `report_path`，旧参数名不再生效，升级时需同步修改工作流。
 
@@ -155,6 +154,7 @@ upload-ut-action/
 ├── src/
 │   ├── parser/      # 各工具报告的解析器
 │   ├── normalizer/  # 标准 JSON 转换
+│   ├── util/        # 平台判定等通用工具
 │   └── obs/         # OBS 上传与平台回调
 ├── dist/
 │   └── index.js     # ncc 打包产物，Action 实际运行此文件
