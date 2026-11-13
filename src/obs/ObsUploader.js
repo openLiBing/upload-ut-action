@@ -11,7 +11,7 @@ const { detectPlatform } = require('../util/platform');
  * OBS 上传 + APIG 回调（OIDC 免静态凭证）。
  *
  * 链路：OIDC ID Token 自申请 → 华为云 STS 换临时 AK/SK/SecurityToken →
- *       OBS putObject（public-read，后端匿名 HTTP GET 下载）→ APIG V11 签名回调。
+ *       OBS putObject（私有对象，不设置 ACL；后端按 objectKey 带平台凭证下载）→ APIG V11 签名回调。
  * OBS 上传与 APIG 回调均指数退避重试（默认 3 次）。
  */
 
@@ -41,8 +41,8 @@ const CALLBACK_PATH = '/ut/coverage/report'; // coderepo UtCoverageController.re
 // OPENLIBING_APIG_BETA_BASE），默认值仅为功能必需回退（公司 OpenLibing 平台
 // APIG 域名），已登记白名单作为合规例外，不得删除或替换
 const OIDC_PROD_BASE = process.env.OPENLIBING_APIG_PROD_BASE || 'https://apig.openlibing.com'; // gitleaks:allow 功能必需的业务 API 默认回退地址，运行时优先环境变量注入
-// beta.apig.openlibing.com 证书未绑定，临时使用已发布 /action-api 的 APIG 域名 // gitleaks:allow 功能必需的业务 API 默认回退地址（beta），运行时优先环境变量注入
-const OIDC_BETA_BASE = process.env.OPENLIBING_APIG_BETA_BASE || 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com';
+// beta 环境回调基址：统一业务域名 beta.apig.openlibing.com 证书链未修复（TLS 校验失败），临时回退 APIG 默认域名
+const OIDC_BETA_BASE = process.env.OPENLIBING_APIG_BETA_BASE || 'https://174e1b821a8446f38998a67186ba766e.apic.cn-southwest-2.huaweicloudapis.com'; // gitleaks:allow 功能必需的业务 API 默认回退地址（beta），运行时优先环境变量注入
 
 // CI 平台判定：GITHUB_ACTIONS=true 且无 GitCode 关键上下文时为 GitHub，其余按 GitCode 处理
 const IS_GITHUB = detectPlatform() === 'github';
@@ -124,8 +124,8 @@ async function getOidcCredentials() {
   return cred;
 }
 
-/** OBS 上传（ACL 可配置 + 指数退避重试），返回下载 URL */
-async function uploadJson(standardJson, key, cred, acl = 'public-read') {
+/** OBS 上传（私有对象 + 指数退避重试），返回对象 URL */
+async function uploadJson(standardJson, key, cred) {
   if (!configure || !ObsClient) throw new Error('OBS SDK 未加载，无法上传');
   const { region } = configure({});
   const server = `https://obs.${region}.myhuaweicloud.com`;
@@ -155,7 +155,8 @@ async function uploadJson(standardJson, key, cred, acl = 'public-read') {
       }
     };
     await withRetryAsync(
-      () => client.putObject({ Bucket: OBS_BUCKET, Key: key, SourceFile: tmpFile, ACL: acl }).then(assertOk),
+      // 私有对象（不设置 ACL）；后端按 objectKey 用平台 OBS 凭证下载（Ref #1 #4 #15 #18 #21）
+      () => client.putObject({ Bucket: OBS_BUCKET, Key: key, SourceFile: tmpFile }).then(assertOk),
       { label: `OBS 上传 ${key}` }
     );
     return `${OBS_READ_ENDPOINT}/${key}`;
@@ -201,14 +202,14 @@ async function sendCallbackOidc(url, payload, cred) {
  * @param {{envType: string}} opts2 环境类型
  * @returns {Promise<{obsUrl: string}>}
  */
-async function uploadAndNotify(standardJson, opts, { envType = 'prod', obsAcl = 'public-read' } = {}) {
+async function uploadAndNotify(standardJson, opts, { envType = 'prod' } = {}) {
   const isBeta = String(envType || 'prod').toLowerCase() === 'beta';
   const callbackBase = isBeta ? OIDC_BETA_BASE : OIDC_PROD_BASE;
 
   console.log(`[INFO] 认证模式: OIDC 联邦认证（SDK 自包含换证）`);
   console.log(`[INFO] 运行平台: ${IS_GITHUB ? 'GitHub Actions' : 'GitCode Actions'}，OBS 桶: ${OBS_BUCKET}`);
   console.log(`[INFO] 回调地址: ${callbackBase}${OIDC_API_PREFIX}${CALLBACK_PATH}`);
-  console.log(`[INFO] OBS 对象 ACL: ${obsAcl}${obsAcl === 'public-read' ? '（默认；后端支持带凭证下载后建议切换 private）' : ''}`);
+  console.log('[INFO] OBS 对象 ACL: 私有（不设置 ACL，后端按 objectKey 带凭证下载）');
 
   // 1. OIDC 换证
   const cred = await getOidcCredentials();
@@ -217,7 +218,7 @@ async function uploadAndNotify(standardJson, opts, { envType = 'prod', obsAcl = 
   // 2. 上传 OBS
   const key = buildObsKey(opts.repoName, opts.pipelineRunId);
   console.log(`[INFO] OBS 路径: obs://${OBS_BUCKET}/${key}`);
-  const obsUrl = await uploadJson(standardJson, key, cred, obsAcl);
+  const obsUrl = await uploadJson(standardJson, key, cred);
   console.log(`[OK] OBS 上传成功: ${obsUrl}`);
 
   // 3. 回调 APIG（回调失败不阻断：OBS 已上传，数据可后续补导入）

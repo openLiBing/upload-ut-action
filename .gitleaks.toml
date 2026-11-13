@@ -150,6 +150,9 @@ regexes = [
     '''^[a-z][a-z0-9-]{2,30}$''',
     '''^[a-zA-Z]+[a-zA-Z0-9]*=$''',
 ]
+[[rules.allowlists]]
+description = "ncc 打包产物 dist/ 内第三方 SDK 源码（凭证运行时注入，无硬编码秘密）"
+paths = ['''^dist/''']
 
 [[rules]]
 id = "explicit-access-key-short"
@@ -158,6 +161,9 @@ regex = '''(?i)\b(ak|sk)(?:\s*[:=]\s*|["'])([a-zA-Z0-9+/=_-]{6,})'''
 entropy = 3.0
 secretGroup = 2
 keywords = ["ak", "sk"]
+[[rules.allowlists]]
+description = "ncc 打包产物 dist/ 内第三方 SDK 源码（凭证运行时注入，无硬编码秘密）"
+paths = ['''^dist/''']
 
 [[rules]]
 id = "explicit-token"
@@ -267,3 +273,6 @@ regexes = [
   '''(?:contact|pre-commit|support|TARGET_LOGIN)@openlibing\.com$''',
   '''^glpat-xxx@[a-z0-9.-]+\.[a-z]+$''',
 ]
+[[rules.allowlists]]
+description = "ncc 打包产物 dist/ 内第三方依赖的版权/作者信息行"
+paths = ['''^dist/''']
