@@ -16,7 +16,14 @@
 | `env_type`    | 否   | `prod`           | 环境类型：`prod`（正式）/ `beta`（测试）     |
 | `region`      | 否   | `cn-southwest-2` | 华为云区域                                   |
 
-> v1.0.1 起 `report_dir` 重命名为 `report_path`，旧参数名不再生效，升级时需同步修改工作流。
+> v1.0.1 起 `report_dir` 重命名为 `report_path`。**旧名仍可用但不推荐**（新名缺省时自动兜底并打印弃用警告），将于下个 major 版本移除，请尽快迁移：
+>
+> ```yaml
+> # 旧写法（已弃用）        →  新写法
+> report_dir: ./coverage/   →  report_path: ./coverage/
+> ```
+>
+> 两者都未配置时启动报错，错误提示指向 `report_path`。
 
 ## 输出
 

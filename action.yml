@@ -5,12 +5,25 @@ description: "解析多种单元测试覆盖率报告（jacoco / coverage.py / g
 
 inputs:
   report_path:
-    description: "覆盖率报告路径：单个文件、目录（目录递归扫描）或逗号分隔的多个路径。自动识别 jacoco.xml / coverage.json(coverage.py) / coverage.out(go test) / .gcov / lcov(.lcov/.info) / coverage-final.json(c8) / llvm-cov export(.json)"
-    required: true
+    description: "覆盖率报告路径：单个文件、目录（目录递归扫描）或逗号分隔的多个路径。自动识别 jacoco.xml / coverage.json(coverage.py) / coverage.out(go test) / .gcov / lcov(.lcov/.info) / coverage-final.json(c8) / llvm-cov export(.json)。v1.0.1 前的旧输入名 report_dir 仍可用（兼容支持，推荐迁移到本参数）"
+    required: false
     default: ""
     layout:
       type: "input"
       label: "覆盖率报告路径（文件/目录，逗号分隔多值）"
+      extend_prop:
+        visible_conditions: []
+        disabled_conditions: []
+      validation:
+        required_message: ""
+  report_dir:
+    description: "【已弃用】v1.0.1 前的旧输入名，等价于 report_path；新名缺省时兜底使用并打印弃用警告，将于下个 major 版本移除"
+    required: false
+    default: ""
+    deprecated: true
+    layout:
+      type: "input"
+      label: "覆盖率报告路径（旧名，已弃用，建议改用 report_path）"
       extend_prop:
         visible_conditions: []
         disabled_conditions: []
