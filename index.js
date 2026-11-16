@@ -134,6 +134,9 @@ function resolveGithubCommitId(env, eventName) {
  * 其余按 GitCode Actions 处理。GitHub 只读 GITHUB_*，GitCode 只读 ATOMGIT_*，不跨平台混用。
  * PR/MR 事件统一按源分支归属数据：GitHub 取 GITHUB_HEAD_REF + pull_request.head.sha，
  * GitCode 取 ATOMGIT_HEAD_REF。
+ * 流水线运行编号/名称同样按平台读取：GitHub 取 GITHUB_RUN_NUMBER/GITHUB_WORKFLOW，
+ * GitCode 取 ATOMGIT_RUN_NUMBER/ATOMGIT_WORKFLOW；手动触发等无变量场景兜底空串，
+ * 后端按未知来源处理。
  */
 function resolvePlatformContext(env = process.env) {
   const isGithub = detectPlatform(env) === 'github';
@@ -148,6 +151,8 @@ function resolvePlatformContext(env = process.env) {
       branchName: isPullRequest ? (env.GITHUB_HEAD_REF || '') : (env.GITHUB_REF_NAME || ''),
       pipelineRunId: env.GITHUB_RUN_ID || '',
       commitId: resolveGithubCommitId(env, eventName),
+      runNumber: env.GITHUB_RUN_NUMBER || '',
+      pipelineName: env.GITHUB_WORKFLOW || '',
       repoName: repository.split('/').pop() || 'unknown-repo',
       workspace: env.GITHUB_WORKSPACE || process.cwd(),
     };
@@ -164,6 +169,8 @@ function resolvePlatformContext(env = process.env) {
       : (env.ATOMGIT_REF_NAME || ''),
     pipelineRunId: env.ATOMGIT_RUN_ID || '',
     commitId: env.ATOMGIT_SHA || '',
+    runNumber: env.ATOMGIT_RUN_NUMBER || '',
+    pipelineName: env.ATOMGIT_WORKFLOW || '',
     repoName: repository.split('/').pop() || 'unknown-repo',
     workspace: env.WORKSPACE || process.cwd(),
   };
@@ -217,7 +224,7 @@ async function run() {
   const region = resolveRegion();
 
   const platform = resolvePlatformContext();
-  const { gitUrl, branchName, pipelineRunId, commitId, repoName, workspace } = platform;
+  const { gitUrl, branchName, pipelineRunId, commitId, repoName, workspace, runNumber, pipelineName } = platform;
 
   console.log('===== upload-ut-action 启动 =====');
   console.log(`[INFO] 运行平台: ${platform.isGithub ? 'GitHub Actions' : 'GitCode Actions'}`);
@@ -267,7 +274,12 @@ async function run() {
   }
 
   const repoRoot = resolveRepoRoot(workspace);
-  const standardJson = CoverageNormalizer.normalize(parsedList, { gitUrl, branchName, pipelineRunId, commitId }, repoRoot);
+  const standardJson =
+    CoverageNormalizer.normalize(
+      parsedList,
+      { gitUrl, branchName, pipelineRunId, commitId, runNumber, pipelineName },
+      repoRoot
+    );
   console.log(`[OK] 标准 JSON 组装完成: lineCoverage=${standardJson.lineCoverage}%, fileDetails=${standardJson.fileDetails.length}`);
   console.log(`[INFO] 可缺省指标: ${['branchCoverage', 'methodCoverage', 'classCoverage'].filter((k) => standardJson[k] != null).join(', ') || '无'}`);
 
