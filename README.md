@@ -11,13 +11,21 @@
 
 ## 输入参数
 
-| 参数          | 必填 | 默认值           | 说明                                         |
-| ------------- | ---- | ---------------- | -------------------------------------------- |
-| `report_path` | 是   | -                | 覆盖率报告路径，文件或目录，逗号分隔可传多个 |
-| `env_type`    | 否   | `prod`           | 环境类型：`prod`（正式）/ `beta`（测试）     |
-| `region`      | 否   | `cn-southwest-2` | 华为云区域                                   |
+| 参数          | 必填 | 默认值           | 说明                                                                                         |
+| ------------- | ---- | ---------------- | -------------------------------------------------------------------------------------------- |
+| `report_path` | 否   | -                | 覆盖率报告路径，文件或目录，逗号分隔可传多个；与 `report_dir` 皆缺时启动报错并指向本参数     |
+| `report_dir`  | 否   | -                | 【已弃用】v1.0.1 前的旧输入名，等价于 `report_path`；`report_path` 优先，下个 major 版本移除 |
+| `env_type`    | 否   | `prod`           | 环境类型：`prod`（正式）/ `beta`（测试）                                                     |
+| `region`      | 否   | `cn-southwest-2` | 华为云区域                                                                                   |
 
-> v1.0.1 起 `report_dir` 重命名为 `report_path`，旧参数名不再生效，升级时需同步修改工作流。
+> v1.0.1 起 `report_dir` 重命名为 `report_path`。**旧名仍可用但不推荐**（新名缺省时自动兜底并打印弃用警告），将于下个 major 版本移除，请尽快迁移：
+>
+> ```yaml
+> # 旧写法（已弃用）        →  新写法
+> report_dir: ./coverage/   →  report_path: ./coverage/
+> ```
+>
+> 两者都未配置时启动报错，错误提示指向 `report_path`。
 
 ## 输出
 
@@ -65,7 +73,7 @@ jobs:
         run: |
           go test ./... -coverprofile=coverage.out
       - name: Upload UT coverage
-        uses: openlibing/upload-ut-action@v1.0.2
+        uses: openlibing/upload-ut-action@v1.0.1
         with:
           report_path: ./coverage.out
 ```
