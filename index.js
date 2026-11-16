@@ -176,6 +176,29 @@ function resolvePlatformContext(env = process.env) {
   };
 }
 
+/**
+ * 解析覆盖率报告路径输入：主干永久兼容 v1.0.1 前的旧输入名 report_dir。
+ *
+ * <p>新名 report_path 优先；仅传旧名时兜底使用并打印弃用警告；两者皆缺返回空串，
+ * 由调用方报错并指向新名。
+ *
+ * @returns {{reportPath: string, usedDeprecatedName: boolean}} 解析后的路径与旧名使用标记
+ */
+function resolveReportPathInput() {
+  const reportPath = getInput('report_path');
+  if (reportPath) {
+    return { reportPath, usedDeprecatedName: false };
+  }
+  const legacyReportDir = getInput('report_dir');
+  if (legacyReportDir) {
+    console.log(
+      '[WARN] 输入 report_dir 已重命名为 report_path，将于下个 major 版本移除，请尽快迁移',
+    );
+    return { reportPath: legacyReportDir, usedDeprecatedName: true };
+  }
+  return { reportPath: '', usedDeprecatedName: false };
+}
+
 function resolveRegion() {
   const fromInput = getInput('region');
   if (fromInput) {
@@ -196,7 +219,7 @@ function resolveRegion() {
 // ---------- 主流程 ----------
 
 async function run() {
-  const reportPath = getInput('report_path');
+  const { reportPath } = resolveReportPathInput();
   const envType = (getInput('env_type') || 'prod').toLowerCase();
   const region = resolveRegion();
 
@@ -279,7 +302,7 @@ async function run() {
   setOutput('result', 'success');
 }
 
-module.exports = { run, findGitDir, resolveRepoRoot, resolvePlatformContext, setOutput };
+module.exports = { run, findGitDir, resolveRepoRoot, resolvePlatformContext, setOutput, resolveReportPathInput };
 
 if (require.main === module) {
   run().catch((err) => {

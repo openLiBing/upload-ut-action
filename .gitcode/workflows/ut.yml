@@ -21,8 +21,8 @@ permissions:
 env:
   # UT增量行覆盖率门禁阈值：低于该值 PR 流水线失败，可通过仓库变量覆盖，未配置默认 80
   UT_INCREMENTAL_LINE_COVERAGE_THRESHOLD: ${{ vars.UT_INCREMENTAL_LINE_COVERAGE_THRESHOLD || '80' }}
-  # UT报告输出目录：c8 默认输出路径
-  UT_REPORT_DIR: coverage/
+  # UT报告输出路径：c8 默认输出路径
+  UT_REPORT_PATH: coverage/
   # PR 触发场景标记：覆盖率上报仅 push/手动触发执行
   IS_PR_EVENT: ${{ atomgit.event_name != '' && contains('pull_request,pull_request_comment,MR,Note', atomgit.event_name) }}
 
@@ -59,9 +59,9 @@ jobs:
       # 将ut报告上传至openlibing平台运营，插件自动识别 c8 格式
       - name: upload ut report to openlibing
         if: ${{ always() && env.IS_PR_EVENT != 'true' }} # 覆盖率上报仅 push/手动触发执行
-        uses: openlibing/upload-ut-action@v1.0.0
+        uses: openlibing/upload-ut-action@v1.0.1
         with:
-          report_dir: ${{ env.UT_REPORT_DIR }}
+          report_path: ${{ env.UT_REPORT_PATH }}
       - name: Check changed-line coverage
         if: ${{ contains('pull_request_target,pull_request_comment,MR,Note', atomgit.event_name) }}
         run: |
@@ -74,7 +74,7 @@ jobs:
         uses: upload-artifact
         with:
           name: coverage-report
-          path: ${{ env.UT_REPORT_DIR }}
+          path: ${{ env.UT_REPORT_PATH }}
           overwrite: true
           if-no-files-found: warn
           retention-days: 1
