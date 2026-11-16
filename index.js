@@ -290,7 +290,7 @@ async function run() {
   setOutput('result', 'success');
 }
 
-module.exports = { run, findGitDir, resolveRepoRoot, resolvePlatformContext, setOutput };
+module.exports = { run, findGitDir, resolveRepoRoot, resolvePlatformContext, setOutput, resolveReportPathInput };
 
 if (require.main === module) {
   run().catch((err) => {

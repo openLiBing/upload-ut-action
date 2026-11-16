@@ -297,7 +297,7 @@ async function run() {
   setOutput('result', 'success');
 }
 
-module.exports = { run, findGitDir, resolveRepoRoot, resolvePlatformContext, setOutput };
+module.exports = { run, findGitDir, resolveRepoRoot, resolvePlatformContext, setOutput, resolveReportPathInput };
 
 if (require.main === require.cache[eval('__filename')]) {
   run().catch((err) => {
