@@ -58,6 +58,11 @@ test('run() 主流程贯通流水线元数据：编号/名称读自环境变量�
     'ATOMGIT_SHA',
     'ATOMGIT_REPOSITORY',
     'WORKSPACE',
+    // GitCode runner 会向 step 注入输出文件路径与 GITHUB_* 兼容变量，
+    // 不清掉会让 setOutput 按 ATOMGIT_OUTPUT 优先级写到别处 / 误判平台
+    'ATOMGIT_OUTPUT',
+    'GITHUB_OUTPUT',
+    'GITHUB_ACTIONS',
     'STEP_OUTPUT',
     'CLOUD_REGION',
     'CLOUD_REGION_ID',
