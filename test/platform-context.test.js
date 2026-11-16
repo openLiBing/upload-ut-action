@@ -34,11 +34,15 @@ test('GitHub push 事件只读 GITHUB_* 上下文', () => {
     GITHUB_EVENT_NAME: 'push',
     GITHUB_REF_NAME: 'main',
     GITHUB_RUN_ID: '12345',
+    GITHUB_RUN_NUMBER: '77',
+    GITHUB_WORKFLOW: 'UT Coverage',
     GITHUB_SHA: 'abc123',
     GITHUB_WORKSPACE: '/home/runner/work/demo',
     // 非关键 GitCode 变量即使存在也不应参与 GitHub 上下文
     ATOMGIT_REF_NAME: 'ignored-branch',
     ATOMGIT_SHA: 'ignored-sha',
+    ATOMGIT_RUN_NUMBER: 'ignored-run-number',
+    ATOMGIT_WORKFLOW: 'ignored-workflow',
   });
 
   assert.strictEqual(ctx.isGithub, true);
@@ -46,6 +50,8 @@ test('GitHub push 事件只读 GITHUB_* 上下文', () => {
   assert.strictEqual(ctx.branchName, 'main');
   assert.strictEqual(ctx.pipelineRunId, '12345');
   assert.strictEqual(ctx.commitId, 'abc123');
+  assert.strictEqual(ctx.runNumber, '77');
+  assert.strictEqual(ctx.pipelineName, 'UT Coverage');
   assert.strictEqual(ctx.repoName, 'demo');
   assert.strictEqual(ctx.workspace, '/home/runner/work/demo');
 });
@@ -177,6 +183,8 @@ test('GitCode push 事件保持 ATOMGIT_* 映射', () => {
     ATOMGIT_REF_NAME: 'main',
     ATOMGIT_RUN_ID: 'run-1',
     ATOMGIT_SHA: 'sha-1',
+    ATOMGIT_RUN_NUMBER: '42',
+    ATOMGIT_WORKFLOW: 'ut-coverage',
     WORKSPACE: '/home/workspace/demo',
     // GitHub 变量即使存在也不应参与 GitCode 上下文
     GITHUB_REPOSITORY: 'ignored/repo',
@@ -188,6 +196,8 @@ test('GitCode push 事件保持 ATOMGIT_* 映射', () => {
   assert.strictEqual(ctx.branchName, 'main');
   assert.strictEqual(ctx.pipelineRunId, 'run-1');
   assert.strictEqual(ctx.commitId, 'sha-1');
+  assert.strictEqual(ctx.runNumber, '42');
+  assert.strictEqual(ctx.pipelineName, 'ut-coverage');
   assert.strictEqual(ctx.repoName, 'demo');
   assert.strictEqual(ctx.workspace, '/home/workspace/demo');
 });
@@ -211,4 +221,6 @@ test('GitHub 缺少仓库变量时 gitUrl 为空且仓库名回退', () => {
   assert.strictEqual(ctx.branchName, '');
   assert.strictEqual(ctx.pipelineRunId, '');
   assert.strictEqual(ctx.commitId, '');
+  assert.strictEqual(ctx.runNumber, '');
+  assert.strictEqual(ctx.pipelineName, '');
 });
