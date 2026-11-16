@@ -37,23 +37,27 @@ function getInput(name) {
   return (process.env[`INPUT_${name.toUpperCase()}`] || '').trim();
 }
 
-function setOutput(key, value) {
-  // GitHub 使用 GITHUB_OUTPUT，GitCode 使用 STEP_OUTPUT；两者都不存在时仅告警
-  const stepOutput = process.env.GITHUB_OUTPUT || process.env.STEP_OUTPUT;
-  if (!stepOutput) {
-    console.log(`[WARN] GITHUB_OUTPUT/STEP_OUTPUT env not set, skip output: ${key}=${value}`);
+function setOutput(key, value, env = process.env) {
+  // 按平台选择步骤输出文件：GitHub 使用 GITHUB_OUTPUT；GitCode 使用 ATOMGIT_OUTPUT，
+  // 兼容旧变量 STEP_OUTPUT。兼容 runner 同时注入 GITHUB_* 时不得写入 GITHUB_OUTPUT。
+  const outputVars = detectPlatform(env) === 'github'
+    ? ['GITHUB_OUTPUT']
+    : ['ATOMGIT_OUTPUT', 'STEP_OUTPUT'];
+  const outputFile = outputVars.map((name) => (env[name] || '').trim()).find(Boolean) || '';
+  if (!outputFile) {
+    console.log(`[WARN] ${outputVars.join('/')} env not set, skip output: ${key}=${value}`);
     return;
   }
   let filePath;
   try {
-    filePath = fs.statSync(stepOutput).isDirectory() ? path.join(stepOutput, 'output') : stepOutput;
+    filePath = fs.statSync(outputFile).isDirectory() ? path.join(outputFile, 'output') : outputFile;
   } catch (e) {
-    const parentDir = path.dirname(stepOutput);
+    const parentDir = path.dirname(outputFile);
     if (!(fs.existsSync(parentDir) && fs.statSync(parentDir).isDirectory())) {
-      console.log(`[WARN] STEP_OUTPUT path is invalid, skip output: ${key}=${value}`);
+      console.log(`[WARN] ${outputVars.join('/')} path is invalid, skip output: ${key}=${value}`);
       return;
     }
-    filePath = stepOutput;
+    filePath = outputFile;
   }
   fs.appendFileSync(filePath, `${key}=${value}\n`, 'utf-8');
   console.log(`[OUTPUT] ${key}=${value}`);
@@ -110,17 +114,17 @@ function readGithubEventPayload(env) {
 }
 
 /**
- * GitHub 提交 SHA：PR 事件上报目标分支，commitId 取 pull_request.base.sha（目标分支提交），
- * 与 GITHUB_BASE_REF 保持自洽；事件文件缺失时回退 GITHUB_SHA。
+ * GitHub 提交 SHA：PR 事件与 GitCode MR 一致按源分支归属，commitId 取
+ * pull_request.head.sha（源分支提交），与 GITHUB_HEAD_REF 保持自洽；事件文件缺失时回退 GITHUB_SHA。
  */
 function resolveGithubCommitId(env, eventName) {
   if (eventName === 'pull_request' || eventName === 'pull_request_target') {
     const payload = readGithubEventPayload(env);
-    const baseSha = payload && payload.pull_request && payload.pull_request.base
-      ? payload.pull_request.base.sha
+    const headSha = payload && payload.pull_request && payload.pull_request.head
+      ? payload.pull_request.head.sha
       : '';
-    if (baseSha) return baseSha;
-    console.log('[WARN] 未能从 GITHUB_EVENT_PATH 解析 pull_request.base.sha，commitId 回退 GITHUB_SHA');
+    if (headSha) return headSha;
+    console.log('[WARN] 未能从 GITHUB_EVENT_PATH 解析 pull_request.head.sha，commitId 回退 GITHUB_SHA');
   }
   return env.GITHUB_SHA || '';
 }
@@ -128,7 +132,8 @@ function resolveGithubCommitId(env, eventName) {
 /**
  * 一次性解析平台上下文：仅当 GITHUB_ACTIONS=true 且无 GitCode 关键上下文时按 GitHub 处理，
  * 其余按 GitCode Actions 处理。GitHub 只读 GITHUB_*，GitCode 只读 ATOMGIT_*，不跨平台混用。
- * GitHub PR 事件上报目标分支（GITHUB_BASE_REF + pull_request.base.sha），GitCode 保持既有行为。
+ * PR/MR 事件统一按源分支归属数据：GitHub 取 GITHUB_HEAD_REF + pull_request.head.sha，
+ * GitCode 取 ATOMGIT_HEAD_REF。
  */
 function resolvePlatformContext(env = process.env) {
   const isGithub = detectPlatform(env) === 'github';
@@ -140,7 +145,7 @@ function resolvePlatformContext(env = process.env) {
     return {
       isGithub,
       gitUrl: server && repository ? `${server}/${repository}` : '',
-      branchName: isPullRequest ? (env.GITHUB_BASE_REF || '') : (env.GITHUB_REF_NAME || ''),
+      branchName: isPullRequest ? (env.GITHUB_HEAD_REF || '') : (env.GITHUB_REF_NAME || ''),
       pipelineRunId: env.GITHUB_RUN_ID || '',
       commitId: resolveGithubCommitId(env, eventName),
       repoName: repository.split('/').pop() || 'unknown-repo',
@@ -262,7 +267,7 @@ async function run() {
   setOutput('result', 'success');
 }
 
-module.exports = { run, findGitDir, resolveRepoRoot, resolvePlatformContext };
+module.exports = { run, findGitDir, resolveRepoRoot, resolvePlatformContext, setOutput };
 
 if (require.main === module) {
   run().catch((err) => {

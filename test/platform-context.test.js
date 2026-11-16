@@ -50,7 +50,7 @@ test('GitHub push 事件只读 GITHUB_* 上下文', () => {
   assert.strictEqual(ctx.workspace, '/home/runner/work/demo');
 });
 
-test('GitHub pull_request 事件使用目标分支 GITHUB_BASE_REF', () => {
+test('GitHub pull_request 事件使用源分支 GITHUB_HEAD_REF', () => {
   const ctx = resolvePlatformContext({
     GITHUB_ACTIONS: 'true',
     GITHUB_SERVER_URL: 'https://github.com',
@@ -61,23 +61,24 @@ test('GitHub pull_request 事件使用目标分支 GITHUB_BASE_REF', () => {
     GITHUB_HEAD_REF: 'feature-x',
   });
 
-  assert.strictEqual(ctx.branchName, 'main');
+  assert.strictEqual(ctx.branchName, 'feature-x');
 });
 
-test('GitHub pull_request_target 事件同样使用目标分支', () => {
+test('GitHub pull_request_target 事件同样使用源分支', () => {
   const ctx = resolvePlatformContext({
     GITHUB_ACTIONS: 'true',
     GITHUB_SERVER_URL: 'https://github.com',
     GITHUB_REPOSITORY: 'owner/repo',
     GITHUB_EVENT_NAME: 'pull_request_target',
     GITHUB_REF_NAME: 'main',
-    GITHUB_BASE_REF: 'release',
+    GITHUB_BASE_REF: 'main',
+    GITHUB_HEAD_REF: 'feature-y',
   });
 
-  assert.strictEqual(ctx.branchName, 'release');
+  assert.strictEqual(ctx.branchName, 'feature-y');
 });
 
-test('GitHub pull_request commitId 取目标分支 base.sha', () => {
+test('GitHub pull_request commitId 取源分支 head.sha', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-event-'));
   const eventPath = path.join(dir, 'event.json');
   fs.writeFileSync(
@@ -90,13 +91,13 @@ test('GitHub pull_request commitId 取目标分支 base.sha', () => {
       GITHUB_SERVER_URL: 'https://github.com',
       GITHUB_REPOSITORY: 'owner/repo',
       GITHUB_EVENT_NAME: 'pull_request',
-      GITHUB_BASE_REF: 'main',
+      GITHUB_HEAD_REF: 'feature-x',
       GITHUB_SHA: 'merge-sha',
       GITHUB_EVENT_PATH: eventPath,
     });
 
-    assert.strictEqual(ctx.branchName, 'main');
-    assert.strictEqual(ctx.commitId, 'base-sha');
+    assert.strictEqual(ctx.branchName, 'feature-x');
+    assert.strictEqual(ctx.commitId, 'head-sha');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

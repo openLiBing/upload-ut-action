@@ -102,7 +102,7 @@ jobs:
 说明：
 
 - `report_path` 指向报告生成位置即可，仓库、分支、流水线等信息由平台自动注入，无需手动传入
-- PR 事件默认按目标分支归属数据；GitHub 取 `GITHUB_BASE_REF` + `pull_request.base.sha`，GitCode 保持既有取值行为
+- PR 事件按源分支归属数据：GitHub 取 `GITHUB_HEAD_REF` + `pull_request.head.sha`，GitCode 取 `ATOMGIT_HEAD_REF`，两个平台口径一致
 - GitHub 上报到 `openlibing-github-action` 桶，GitCode 上报到 `openlibing-gitcode-action` 桶，对象 key 结构一致
 - 未识别到任何报告时 step 仍以成功结束（仅记录告警），不影响流水线通过
 
