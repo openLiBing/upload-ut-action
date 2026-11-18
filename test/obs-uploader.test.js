@@ -35,3 +35,15 @@ test('回调路径前缀与常量正确', () => {
   assert.strictEqual(ObsUploader.CALLBACK_PATH, '/ut/coverage/report');
   assert.strictEqual(ObsUploader.OBS_PREFIX, 'ut-coverage-action');
 });
+
+test('selectObsBucket 按平台选择隔离桶', () => {
+  assert.strictEqual(ObsUploader.selectObsBucket(true), 'openlibing-github-action');
+  assert.strictEqual(ObsUploader.selectObsBucket(false), 'openlibing-gitcode-action');
+});
+
+test('OBS 读地址与选中桶名一致', () => {
+  assert.strictEqual(
+    ObsUploader.OBS_READ_ENDPOINT,
+    `https://${ObsUploader.OBS_BUCKET}.obs.cn-southwest-2.myhuaweicloud.com`
+  );
+});

@@ -32,7 +32,7 @@ const oidcId = require.resolve('@openlibing/huaweicloud-oidc-client');
 const fakeOidc = {
   V11Signer: class { sign() { return {}; } },
   sendRequest: async () => ({ status: 200, data: { code: 200 } }),
-  getCredentials: async () => ({ accessKeyId: 'AK-test', secretAccessKey: 'SK-test', securityToken: 'ST-test' }),
+  getCredentials: async () => ({ accessKeyId: 'AK-test', secretAccessKey: 'SK-test', securityToken: 'ST-test' }), // gitleaks:allow 测试夹具假凭证
   configure: () => ({ region: 'cn-southwest-2' }),
 };
 require.cache[oidcId] = {
