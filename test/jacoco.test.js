@@ -49,3 +49,16 @@ test('JacocoParser 对无行计数的 sourcefile 应跳过', () => {
   const parsed = JacocoParser.parseContent(xml);
   assert.strictEqual(parsed.files.length, 0);
 });
+
+test('JacocoParser 对大量未闭合 package 保持线性解析', () => {
+  // 构造畸形输入：大量 <package> 起始标签但无 </package> 闭合。
+  // 旧实现用 /<package ...>([\s\S]*?)<\/package>/g 会对每个起始位置回扫到文末，
+  // 退化为 O(n²)；修复后应为线性，输出仍为空。
+  const xml = '<report>' + '<package name="p"><sourcefile name="F.java">'.repeat(10000) + '</report>';
+  const startAt = process.hrtime.bigint();
+  const parsed = JacocoParser.parseContent(xml);
+  const elapsedMs = Number(process.hrtime.bigint() - startAt) / 1e6;
+  assert.strictEqual(parsed.files.length, 0);
+  assert.ok(elapsedMs < 2000, `畸形输入解析耗时 ${elapsedMs.toFixed(0)}ms，疑似回溯爆炸`);
+});
+
