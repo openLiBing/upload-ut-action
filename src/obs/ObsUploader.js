@@ -200,7 +200,9 @@ async function sendCallbackOidc(url, payload, cred) {
  * @param {Object} standardJson 标准上报 JSON
  * @param {{repoName: string, pipelineRunId: string, gitUrl: string, branchName: string}} opts
  * @param {{envType: string}} opts2 环境类型
- * @returns {Promise<{obsUrl: string}>}
+ * @returns {Promise<{obsUrl: string, recordId: (string|undefined), reportUrl: (string|undefined)}>}
+ *          obsUrl 为上传对象地址；recordId/reportUrl 取自回调受理响应 data（评审对齐①：后端受理时预生成
+ *          recordId 并直返结果链接，无需插件二次查询），旧版后端响应缺 data 或回调失败时两者为 undefined。
  */
 async function uploadAndNotify(standardJson, opts, { envType = 'prod' } = {}) {
   const isBeta = String(envType || 'prod').toLowerCase() === 'beta';
@@ -229,6 +231,7 @@ async function uploadAndNotify(standardJson, opts, { envType = 'prod' } = {}) {
     obsUrl,
   };
   const callbackUrl = `${callbackBase}${OIDC_API_PREFIX}${CALLBACK_PATH}`;
+  let acceptance = {};
   try {
     const callbackResult = await withRetryAsync(
       () => sendCallbackOidc(callbackUrl, callbackPayload, cred),
@@ -236,12 +239,15 @@ async function uploadAndNotify(standardJson, opts, { envType = 'prod' } = {}) {
     );
     console.log(`[OK] 回调通知发送成功，回调时间: ${new Date().toISOString()}`);
     console.log(`[INFO] 回调响应: ${JSON.stringify(callbackResult)}`);
+    // 受理响应 data 携带 recordId/reportUrl（评审对齐①）；旧版后端响应无 data 字段时保持 undefined，
+    // 由调用方降级告警，不视为失败
+    acceptance = callbackResult.data || {};
   } catch (err) {
     console.log(`[WARN] 回调通知发送失败: ${err.message}`);
     console.log('[INFO] OBS 上传已成功，回调失败不影响数据留存');
   }
 
-  return { obsUrl };
+  return { obsUrl, recordId: acceptance.recordId, reportUrl: acceptance.reportUrl };
 }
 
 module.exports = {
