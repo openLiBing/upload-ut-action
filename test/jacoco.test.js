@@ -61,4 +61,3 @@ test('JacocoParser 对大量未闭合 package 保持线性解析', () => {
   assert.strictEqual(parsed.files.length, 0);
   assert.ok(elapsedMs < 2000, `畸形输入解析耗时 ${elapsedMs.toFixed(0)}ms，疑似回溯爆炸`);
 });
-
