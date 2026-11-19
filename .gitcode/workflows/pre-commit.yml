@@ -20,37 +20,21 @@ permissions:
 jobs:
   pre-commit:
     name: pre-commit
-    runs-on: ["self-hosted", "region=overseas"]
+    runs-on: ["self-hosted", "default"]
     steps:
       - name: Checkout repository
         uses: checkout
         with:
           ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.event.pull_request.head.sha }} # 使用预合并后的 commit SHA 进行检出，确保 CI 检查的是 PR 与目标分支合并后的最终代码状态
           fetch-depth: 0 # 全量检出以生成基线远端 ref origin/<目标分支>，供 pre-commit-action v1.1.0 增量比较（未传 gc_token 时必需）
-          allow-unsafe-pr-checkout: true # pull_request_comment 触发 fork PR 检出仍需平台放行；pull_request 下为 no-op
-
-      - name: setup-python
-        uses: setup-python
-        with:
-          python-version: "3.14"
-          cache: true
-
-      - name: setup-node
-        uses: setup-node
-        with:
-          node-version: 20
-          cache: true
 
       - name: Install npm dependencies
         run: npm ci
 
       - name: setup-prettier
         run: |
-          npm install --save-dev --save-exact prettier@3.9.5
-          echo 'npx version:' && npx -v
-          echo 'prettier version:' && npx prettier --version
+          npm install --no-save --no-package-lock --no-audit --no-fund prettier@3.9.5
+          npx --no-install prettier --version
 
       - name: pre-commit
         uses: openlibing/pre-commit-action@v1.1.0
-        with:
-          extra_args: ${{ inputs.extra_args }}

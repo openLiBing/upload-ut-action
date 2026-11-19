@@ -16,30 +16,20 @@ stages:
     jobs:
       pre-commit:
         name: pre-commit
-        runs-on: ["self-hosted", "region=overseas"]
+        runs-on: ["self-hosted", "default"]
         steps:
           - name: Checkout repository
             uses: checkout
             with:
               ref: main
 
-          - name: setup-go
-            uses: setup-go
-            with:
-              version: 1.26
-              cache: true
-
-          - name: setup-node
-            uses: setup-node
-            with:
-              node-version: 22
-              cache: true
-
           - name: Install npm dependencies
             run: npm install
 
           - name: setup-prettier
-            run: npm install --save-dev --save-exact prettier@3.9.5
+            run: |
+              npm install --no-save --no-package-lock --no-audit --no-fund prettier@3.9.5
+              npx --no-install prettier --version
 
           - name: run pre-commit
             id: pre-commit
@@ -57,25 +47,10 @@ stages:
 
       ut-coverage:
         name: UT 覆盖率
-        runs-on: ["self-hosted", "region=cn"]
+        runs-on: ["self-hosted", "default"]
         steps:
           - name: Checkout repository
             uses: checkout
-
-          - name: Bootstrap tool cache dir (temporary workaround)
-            # 规避 setup 插件在当前执行机上对 /opt/tools 无写权限导致的安装失败
-            run: |
-              if [ ! -d /opt/tools/cache ] || [ ! -w /opt/tools/cache ]; then
-                sudo mkdir -p /opt/tools/cache
-                sudo chown -R "$(id -u):$(id -g)" /opt/tools
-              fi
-              ls -ld /opt/tools /opt/tools/cache
-
-          - name: setup-node
-            uses: setup-node
-            with:
-              node-version: 22
-              cache: true
 
           - name: Install npm dependencies
             run: npm ci
@@ -89,3 +64,26 @@ stages:
             uses: openlibing/upload-ut-action@v1.0.0
             with:
               report_dir: coverage/
+
+      oss-version-scan:
+        name: 开源漏洞和license扫描
+        runs-on: ["self-hosted", "default"]
+        steps:
+          - name: Checkout repository
+            uses: checkout
+            with:
+              ref: main
+
+          - name: Run oss-version-scan-action
+            uses: openlibing/trivy-action@v1.4
+            with:
+              scan-type: version
+              vuln-critical-limit: ${{ vars.NIGHTLY_VUL_CRITICAL_LIMIT || '0'  }}
+              vuln-high-limit: ${{ vars.NIGHTLY_VUL_HIGH_LIMIT || '0'  }}
+              vuln-medium-limit: ${{ vars.NIGHTLY_VUL_MEDIUM_LIMIT || '1000' }}
+              vuln-low-limit: ${{ vars.NIGHTLY_VUL_LOW_LIMIT || '1000' }}
+              license-critical-limit: ${{ vars.NIGHTLY_LICENSE_CRITICAL_LIMIT || '50' }}
+              license-high-limit: ${{ vars.NIGHTLY_LICENSE_HIGH_LIMIT || '50' }}
+              license-medium-limit: ${{ vars.NIGHTLY_LICENSE_MEDIUM_LIMIT || '1000' }}
+              license-low-limit: ${{ vars.NIGHTLY_LICENSE_LOW_LIMIT || '10000' }}
+              show-all-vulnerabilities: "true"

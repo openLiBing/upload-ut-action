@@ -28,30 +28,14 @@ env:
 
 jobs:
   ut:
-    runs-on: ["self-hosted", "region=cn"]
+    runs-on: ["self-hosted", "default"]
     steps:
       - name: checkout
         uses: checkout
         with:
           ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.event.pull_request.head.sha || atomgit.sha }}
           fetch-depth: 0
-      # setup 插件在当前执行机上对 /opt/tools 无写权限时会安装失败，此处临时规避
-      - name: bootstrap tool cache dir
-        run: |
-          if [ ! -d /opt/tools/cache ] || [ ! -w /opt/tools/cache ]; then
-            sudo mkdir -p /opt/tools/cache
-            sudo chown -R "$(id -u):$(id -g)" /opt/tools
-          fi
-      - name: setup-node
-        uses: setup-node
-        with:
-          node-version: 22
-      - name: npm ci
-        run: npm ci
-      - name: setup-python
-        uses: setup-python
-        with:
-          python-version: "3.14"
+
       - name: install diff-cover
         run: python -m pip install diff-cover
       - name: run unit tests

@@ -1,0 +1,32 @@
+name: oss-pr-scan
+
+on:
+  pull_request:
+    branches:
+      - "**"
+
+permissions:
+  repository: read
+
+jobs:
+  oss-pr-scan:
+    name: 开源漏洞和license扫描
+    runs-on: ["self-hosted", "default"]
+    steps:
+      - name: Checkout repository
+        uses: checkout
+        with:
+          ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.event.pull_request.head.sha }}
+
+      - name: Run oss-pr-scan
+        uses: openlibing/trivy-action@v1.4
+        with:
+          scan-type: pr
+          vuln-critical-limit: ${{ vars.VUL_CRITICAL_LIMIT || '0'  }}
+          vuln-high-limit: ${{ vars.VUL_HIGH_LIMIT || '0'  }}
+          vuln-medium-limit: ${{ vars.VUL_MEDIUM_LIMIT || '1000' }}
+          vuln-low-limit: ${{ vars.VUL_LOW_LIMIT || '1000' }}
+          license-critical-limit: ${{ vars.LICENSE_CRITICAL_LIMIT || '50' }}
+          license-high-limit: ${{ vars.LICENSE_HIGH_LIMIT || '50' }}
+          license-medium-limit: ${{ vars.LICENSE_MEDIUM_LIMIT || '1000' }}
+          license-low-limit: ${{ vars.LICENSE_LOW_LIMIT || '10000' }}
