@@ -196,6 +196,16 @@ async function sendCallbackOidc(url, payload, cred) {
 }
 
 /**
+ * 从回调受理响应中提取受理数据（recordId/reportUrl 的唯一取值通道）。
+ * @param {Object|null} callbackResult 回调成功响应（{code, data}）；回调失败/重试耗尽时为 null
+ * @returns {{recordId: (string|undefined), reportUrl: (string|undefined)}}
+ *          响应 data 携带受理字段时透传；响应缺 data / 回调失败时返回空对象，两个字段为 undefined
+ */
+function pickAcceptance(callbackResult) {
+  return (callbackResult && callbackResult.data) || {};
+}
+
+/**
  * 执行完整上报：换证 → 上传 OBS → 回调 APIG。
  * @param {Object} standardJson 标准上报 JSON
  * @param {{repoName: string, pipelineRunId: string, gitUrl: string, branchName: string}} opts
@@ -231,27 +241,28 @@ async function uploadAndNotify(standardJson, opts, { envType = 'prod' } = {}) {
     obsUrl,
   };
   const callbackUrl = `${callbackBase}${OIDC_API_PREFIX}${CALLBACK_PATH}`;
-  let acceptance = {};
+  let callbackResult = null;
   try {
-    const callbackResult = await withRetryAsync(
+    callbackResult = await withRetryAsync(
       () => sendCallbackOidc(callbackUrl, callbackPayload, cred),
       { label: 'APIG 回调' }
     );
     console.log(`[OK] 回调通知发送成功，回调时间: ${new Date().toISOString()}`);
     console.log(`[INFO] 回调响应: ${JSON.stringify(callbackResult)}`);
-    // 受理响应 data 携带 recordId/reportUrl（评审对齐①）；旧版后端响应无 data 字段时保持 undefined，
-    // 由调用方降级告警，不视为失败
-    acceptance = callbackResult.data || {};
   } catch (err) {
     console.log(`[WARN] 回调通知发送失败: ${err.message}`);
     console.log('[INFO] OBS 上传已成功，回调失败不影响数据留存');
   }
 
+  // 受理取值统一走 pickAcceptance（评审对齐①）：成功取 data 携带的 recordId/reportUrl，
+  // 回调失败（callbackResult 为 null）或旧版后端缺 data 字段时为空对象，由调用方降级告警，不视为失败
+  const acceptance = pickAcceptance(callbackResult);
   return { obsUrl, recordId: acceptance.recordId, reportUrl: acceptance.reportUrl };
 }
 
 module.exports = {
   uploadAndNotify,
+  pickAcceptance,
   selectObsBucket,
   buildObsKey,
   getOidcCredentials,
