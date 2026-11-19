@@ -36,6 +36,9 @@ jobs:
           ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.event.pull_request.head.sha || atomgit.sha }}
           fetch-depth: 0
 
+      - name: install npm dependencies
+        run: npm ci
+
       - name: install diff-cover
         run: python -m pip install diff-cover
       - name: run unit tests
