@@ -13,7 +13,7 @@ permissions:
 jobs:
   code-metrics:
     name: code-metrics
-    runs-on: ["self-hosted", "region=cn"]
+    runs-on: ["self-hosted", "default"]
     steps:
       - name: checkout
         uses: checkout

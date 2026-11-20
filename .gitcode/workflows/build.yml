@@ -1,0 +1,33 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - "*"
+  pull_request_comment:
+    types: [created]
+    comments: ["/build"]
+    branches:
+      - "*"
+
+permissions:
+  repository: read
+
+jobs:
+  build:
+    runs-on: ["self-hosted", "default"]
+    steps:
+      - name: checkout
+        uses: checkout
+        with:
+          ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.event.pull_request.head.sha || atomgit.sha }}
+          fetch-depth: 0
+
+      - name: Build
+        run: |
+          npm ci
+          npm run build

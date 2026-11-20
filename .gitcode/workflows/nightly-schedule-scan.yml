@@ -1,0 +1,89 @@
+name: nightly-schedule-scan
+
+on:
+  schedule:
+    - cron: "0 40 2 * * ?"
+  workflow_dispatch:
+
+permissions:
+  repository: read
+  id-token: write
+
+stages:
+  nightly-scan:
+    name: 夜间扫描
+    fail_fast: false
+    jobs:
+      pre-commit:
+        name: pre-commit
+        runs-on: ["self-hosted", "default"]
+        steps:
+          - name: Checkout repository
+            uses: checkout
+            with:
+              ref: main
+
+          - name: Install npm dependencies
+            run: npm install
+
+          - name: setup-prettier
+            run: |
+              npm install --no-save --no-package-lock --no-audit --no-fund prettier@3.9.5
+              npx --no-install prettier --version
+
+          - name: run pre-commit
+            id: pre-commit
+            uses: openlibing/pre-commit-action@v1.1.0
+            with:
+              extra_args: "--all-files"
+              report-dir: ./tmp_pre-commit-reports/
+
+          - name: upload sarif reports
+            if: ${{ always() }}
+            uses: openlibing/upload-sarif-action@v1.0.0
+            with:
+              sarif_file: ${{ steps.pre-commit.outputs.sarif-files }}
+              source_path: .
+
+      ut-coverage:
+        name: UT 覆盖率
+        runs-on: ["self-hosted", "default"]
+        steps:
+          - name: Checkout repository
+            uses: checkout
+
+          - name: Install npm dependencies
+            run: npm ci
+
+          - name: Run tests with coverage
+            # c8 采集 V8 覆盖率，产出 coverage/coverage-final.json 供平台上报
+            run: npx --yes c8@10 --all --include='src/**/*.js' --include='index.js' --reporter=text --reporter=json npm test
+
+          - name: Upload UT coverage
+            if: ${{ always() }}
+            uses: openlibing/upload-ut-action@v1.0.0
+            with:
+              report_dir: coverage/
+
+      oss-version-scan:
+        name: 开源漏洞和license扫描
+        runs-on: ["self-hosted", "default"]
+        steps:
+          - name: Checkout repository
+            uses: checkout
+            with:
+              ref: main
+
+          - name: Run oss-version-scan-action
+            uses: openlibing/trivy-action@v1.4
+            with:
+              scan-type: version
+              vuln-critical-limit: ${{ vars.NIGHTLY_VUL_CRITICAL_LIMIT || '0'  }}
+              vuln-high-limit: ${{ vars.NIGHTLY_VUL_HIGH_LIMIT || '0'  }}
+              vuln-medium-limit: ${{ vars.NIGHTLY_VUL_MEDIUM_LIMIT || '1000' }}
+              vuln-low-limit: ${{ vars.NIGHTLY_VUL_LOW_LIMIT || '1000' }}
+              license-critical-limit: ${{ vars.NIGHTLY_LICENSE_CRITICAL_LIMIT || '50' }}
+              license-high-limit: ${{ vars.NIGHTLY_LICENSE_HIGH_LIMIT || '50' }}
+              license-medium-limit: ${{ vars.NIGHTLY_LICENSE_MEDIUM_LIMIT || '1000' }}
+              license-low-limit: ${{ vars.NIGHTLY_LICENSE_LOW_LIMIT || '10000' }}
+              show-all-vulnerabilities: "true"

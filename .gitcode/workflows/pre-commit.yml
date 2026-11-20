@@ -7,7 +7,7 @@ on:
   push: # 推送时也执行 pre-commit 检查
     branches:
       - main
-  pull_request_target: ## 使用 pull_request_target 确保 PR 流水线始终读取默认分支（main）的最新配置文件
+  pull_request: # 配置中无密钥引用，使用 pull_request 触发
     branches:
       - "*"
   pull_request_comment:
@@ -18,111 +18,67 @@ on:
 
 permissions:
   repository: read
-  pr: write
   id-token: write
 
-stages:
-  initiate:
-    name: initiate
-    jobs:
-      pr-label-running:
-        name: pr-label-running
-        if: ${{ contains('pull_request_target,pull_request_comment,MR,Note', atomgit.event_name) }}
-        runs-on: ["self-hosted", "region=cn"]
-        steps:
-          - name: pr-label-running
-            uses: openlibing/pr-label-action@v1.0.0
-            with:
-              token: ${{ secrets.ROBOT_TOKEN }}
-              add_labels: ci-pipeline-running
-              remove_labels: ci-pipeline-passed,ci-pipeline-failed
+jobs:
+  full-scan:
+    name: pre-commit full scan
+    if: ${{ atomgit.event_name == 'schedule' }}
+    runs-on: ["self-hosted", "region=overseas"]
+    steps:
+      - name: Checkout repository
+        uses: checkout
+      - name: Setup Python
+        uses: setup-python
+        with:
+          version: "3.11"
+      - name: Setup Go
+        uses: setup-go
+        with:
+          version: 1.26
+      - name: Setup Node.js
+        uses: setup-node
+        with:
+          node-version: "22"
+      - name: Install ESLint dependencies and formatter
+        run: |
+          npm ci --no-audit --no-fund
+          npm install --no-save --no-package-lock eslint@9.39.2 @eslint/js@9.39.2
+          npm install --prefix /tmp/openlibing-eslint-formatter --no-save --no-package-lock @microsoft/eslint-formatter-sarif@3.1.0
+      - name: Create SARIF report directory
+        run: mkdir -p ./tmp_pre-commit-reports/
+      - name: Run pre-commit
+        id: pre-commit
+        uses: openlibing/pre-commit-action@v1.1.0
+        with:
+          extra_args: "--all-files --hook-stage=manual"
+          report-dir: ./tmp_pre-commit-reports/
+      - name: Upload SARIF
+        if: ${{ always() }}
+        uses: openlibing/upload-sarif-action@v1.0.2
+        with:
+          sarif_file: ${{ steps.pre-commit.outputs.sarif-files }}
+          source_path: .
+          category: "pre-commit-report"
 
   pre-commit:
     name: pre-commit
-    jobs:
-      full-scan:
-        name: pre-commit full scan
-        if: ${{ atomgit.event_name == 'schedule' }}
-        runs-on: ["self-hosted", "region=overseas"]
-        steps:
-          - name: Checkout repository
-            uses: checkout
-          - name: Setup Python
-            uses: setup-python
-            with:
-              version: "3.11"
-          - name: Setup Go
-            uses: setup-go
-            with:
-              version: 1.26
-          - name: Setup Node.js
-            uses: setup-node
-            with:
-              node-version: "22"
-          - name: Install ESLint dependencies and formatter
-            run: |
-              npm ci --no-audit --no-fund
-              npm install --no-save --no-package-lock eslint@9.39.2 @eslint/js@9.39.2
-              npm install --prefix /tmp/openlibing-eslint-formatter --no-save --no-package-lock @microsoft/eslint-formatter-sarif@3.1.0
-          - name: Create SARIF report directory
-            run: mkdir -p ./tmp_pre-commit-reports/
-          - name: Run pre-commit
-            id: pre-commit
-            uses: openlibing/pre-commit-action@v1.0.3
-            with:
-              extra_args: "--all-files --hook-stage=manual"
-              report-dir: ./tmp_pre-commit-reports/
-          - name: Upload SARIF
-            if: ${{ always() }}
-            uses: openlibing/upload-sarif-action@v1.0.1
-            with:
-              sarif_file: ${{ steps.pre-commit.outputs.sarif-files }}
-              source_path: .
-              category: "pre-commit-report"
-      pre-commit:
-        name: pre-commit
-        if: ${{ atomgit.event_name != 'schedule' }}
-        runs-on: ["self-hosted", "region=overseas"]
-        steps:
-          - name: Checkout repository
-            uses: checkout
-            with:
-              ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.event.pull_request.head.sha }} # 使用预合并后的 commit SHA 进行检出，确保 CI 检查的是 PR 与目标分支合并后的最终代码状态
-              allow-unsafe-pr-checkout: true # 关闭 fork PR 检出拦截，避免流水线在 fork PR 场景失败
+    if: ${{ atomgit.event_name != 'schedule' }}
+    runs-on: ["self-hosted", "default"]
+    steps:
+      - name: Checkout repository
+        uses: checkout
+        with:
+          ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.event.pull_request.head.sha }} # 使用预合并后的 commit SHA 进行检出，确保 CI 检查的是 PR 与目标分支合并后的最终代码状态
+          fetch-depth: 0 # 全量检出以生成基线远端 ref origin/<目标分支>，供 pre-commit-action v1.1.0 增量比较（未传 gc_token 时必需）
 
-          - name: setup-python
-            uses: setup-python
-            with:
-              python-version: "3.14"
-              cache: true
+      - name: Install npm dependencies
+        run: npm ci
 
-          - name: setup-node
-            uses: setup-node
-            with:
-              node-version: 20
-              cache: true
+      - name: setup-prettier
+        run: |
+          npm install --no-save --no-package-lock --no-audit --no-fund prettier@3.9.5
+          npx --no-install prettier --version
 
-          - name: setup-prettier
-            run: |
-              npm install --save-dev --save-exact prettier@3.9.5
-              echo 'npx version:' && npx -v
-              echo 'prettier version:' && npx prettier --version
-
-          - name: pre-commit
-            uses: openlibing/pre-commit-action@v1.0.2
-            with:
-              extra_args: ${{ inputs.extra_args }}
-
-post:
-  jobs:
-    label-pr:
-      name: pr-label-complete
-      if: ${{ contains('pull_request_target,pull_request_comment,MR,Note', atomgit.event_name) }}
-      runs-on: ["self-hosted", "region=cn"]
-      steps:
-        - name: set pr label complete
-          uses: openlibing/pr-label-action@v1.0.0
-          with:
-            token: ${{ secrets.ROBOT_TOKEN }}
-            add_labels: ${{ pipeline.upstream_status == 'COMPLETED' && 'ci-pipeline-passed' || 'ci-pipeline-failed' }}
-            remove_labels: ci-pipeline-running
+      - name: pre-commit
+        uses: openlibing/pre-commit-action@v1.1.0

@@ -38,6 +38,25 @@ function parseCounters(block) {
   return counters;
 }
 
+/**
+ * 提取形如 <tag ...>...</tag> 的块。
+ *
+ * 用 indexOf 定位闭合标签，避免 `[\s\S]*?` 在畸形输入（大量未闭合起始标签）上
+ * 逐字符回溯导致的二次复杂度；提取结果与惰性量词写法一致。
+ */
+function extractBlocks(text, openRe, closeTag) {
+  const blocks = [];
+  let m;
+  while ((m = openRe.exec(text)) !== null) {
+    const start = openRe.lastIndex;
+    const end = text.indexOf(closeTag, start);
+    if (end === -1) break;
+    blocks.push({ match: m, block: text.slice(start, end) });
+    openRe.lastIndex = end + closeTag.length;
+  }
+  return blocks;
+}
+
 /** 由 counter 集合构建统一文件条目；无 LINE 计数（空源码文件）返回 null */
 function buildFileItem(filePath, counters) {
   const line = counters.line;
@@ -66,15 +85,12 @@ function parseContent(xml) {
   const agg = { line: { covered: 0, total: 0 }, branch: { covered: 0, total: 0 }, method: { covered: 0, total: 0 }, class: { covered: 0, total: 0 } };
   const files = [];
 
-  const pkgRe = /<package\s+name="([^"]*)">([\s\S]*?)<\/package>/g;
-  let pm;
-  while ((pm = pkgRe.exec(xml)) !== null) {
+  const pkgRe = /<package\s+name="([^"]*)">/g;
+  for (const { match: pm, block: pkgBlock } of extractBlocks(xml, pkgRe, '</package>')) {
     const pkgName = pm[1];
-    const pkgBlock = pm[2];
-    const sfRe = /<sourcefile\s+name="([^"]*)">([\s\S]*?)<\/sourcefile>/g;
-    let sm;
-    while ((sm = sfRe.exec(pkgBlock)) !== null) {
-      const counters = parseCounters(sm[2]);
+    const sfRe = /<sourcefile\s+name="([^"]*)">/g;
+    for (const { match: sm, block: sfBlock } of extractBlocks(pkgBlock, sfRe, '</sourcefile>')) {
+      const counters = parseCounters(sfBlock);
       const filePath = (pkgName ? pkgName + '/' : '') + sm[1];
       const item = buildFileItem(filePath, counters);
       if (item) files.push(item);
