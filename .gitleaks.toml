@@ -13,6 +13,7 @@ useDefault = true
 [allowlist]
 description = "已知误报/无需扫描路径"
 paths = [
+    '''(^|/)tmp_pre-commit-reports(/|$)''',
     '''^\.idea/''',
     '''^target/''',
     # ncc 打包产物：内联第三方依赖会带入示例密钥/许可证邮箱等误报；源码文件已单独扫描
