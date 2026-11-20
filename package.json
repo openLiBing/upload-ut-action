@@ -12,7 +12,7 @@
   "author": "openLiBing",
   "license": "ISC",
   "dependencies": {
-    "@openlibing/huaweicloud-oidc-client": "0.0.7",
+    "@openlibing/huaweicloud-oidc-client": "0.0.8",
     "esdk-obs-nodejs": "^3.26.2"
   },
   "devDependencies": {
@@ -21,5 +21,8 @@
   },
   "engines": {
     "node": ">=16.0.0"
+  },
+  "overrides": {
+    "fast-xml-parser": "5.12.1"
   }
 }
