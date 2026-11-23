@@ -1,8 +1,6 @@
 name: pre-commit
 
 on:
-  schedule:
-    - cron: "0 0 3 * * ?"
   workflow_dispatch:
   push: # 推送时也执行 pre-commit 检查
     branches:
@@ -18,52 +16,10 @@ on:
 
 permissions:
   repository: read
-  id-token: write
 
 jobs:
-  full-scan:
-    name: pre-commit full scan
-    if: ${{ atomgit.event_name == 'schedule' }}
-    runs-on: ["self-hosted", "region=overseas"]
-    steps:
-      - name: Checkout repository
-        uses: checkout
-      - name: Setup Python
-        uses: setup-python
-        with:
-          version: "3.11"
-      - name: Setup Go
-        uses: setup-go
-        with:
-          version: 1.26
-      - name: Setup Node.js
-        uses: setup-node
-        with:
-          node-version: "22"
-      - name: Install ESLint dependencies and formatter
-        run: |
-          npm ci --no-audit --no-fund
-          npm install --no-save --no-package-lock eslint@9.39.2 @eslint/js@9.39.2
-          npm install --prefix /tmp/openlibing-eslint-formatter --no-save --no-package-lock @microsoft/eslint-formatter-sarif@3.1.0
-      - name: Create SARIF report directory
-        run: mkdir -p ./tmp_pre-commit-reports/
-      - name: Run pre-commit
-        id: pre-commit
-        uses: openlibing/pre-commit-action@v1.1.0
-        with:
-          extra_args: "--all-files --hook-stage=manual"
-          report-dir: ./tmp_pre-commit-reports/
-      - name: Upload SARIF
-        if: ${{ always() }}
-        uses: openlibing/upload-sarif-action@v1.0.2
-        with:
-          sarif_file: ${{ steps.pre-commit.outputs.sarif-files }}
-          source_path: .
-          category: "pre-commit-report"
-
   pre-commit:
     name: pre-commit
-    if: ${{ atomgit.event_name != 'schedule' }}
     runs-on: ["self-hosted", "default"]
     steps:
       - name: Checkout repository

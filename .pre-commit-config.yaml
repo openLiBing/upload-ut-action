@@ -2,15 +2,6 @@
 # pip install pre-commit  # 安装pre-commit工具
 # pre-commit install  # 安装git hook，请在代码仓根目录执行
 repos:
-  - repo: local
-    hooks:
-      - id: eslint-sarif
-        name: ESLint SARIF full scan
-        language: system
-        entry: node node_modules/eslint/bin/eslint.js . --ignore-pattern **/.agent/** --ignore-pattern **/.agents/** --ignore-pattern **/.claude/** --format /tmp/openlibing-eslint-formatter/node_modules/@microsoft/eslint-formatter-sarif/sarif.js --output-file ./tmp_pre-commit-reports/eslint.sarif
-        pass_filenames: false
-        always_run: true
-        stages: [manual]
   # ===================== 通用基础钩子（所有语言） =====================
   - repo: https://gitcode.com/gh_mirrors/pr/pre-commit-hooks # 使用gitcode镜像加速
     rev: v6.0.0
