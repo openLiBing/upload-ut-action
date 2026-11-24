@@ -284,8 +284,9 @@ async function run() {
   console.log(`[INFO] 可缺省指标: ${['branchCoverage', 'methodCoverage', 'classCoverage'].filter((k) => standardJson[k] != null).join(', ') || '无'}`);
 
   console.log('\n===== [3] OIDC 换证 + OBS 上传 + APIG 回调 =====');
+  let notifyResult;
   try {
-    await ObsUploader.uploadAndNotify(
+    notifyResult = await ObsUploader.uploadAndNotify(
       standardJson,
       { repoName, pipelineRunId, gitUrl, branchName },
       { envType }
@@ -294,6 +295,19 @@ async function run() {
     console.log(`[ERROR] 上传/回调链路失败: ${err.message}`);
     setOutput('result', 'failed');
     process.exit(1);
+  }
+
+  // 评审对齐①：上报受理响应直接携带记录ID与结果链接（recordId 受理时预生成），无查询接口、无重试；
+  // 旧版后端响应缺字段 / 回调失败 / 仓库定位失败时链接缺省，仅告警不影响流水线结果
+  const { recordId, reportUrl } = notifyResult || {};
+  if (reportUrl) {
+    setOutput('report_url', reportUrl);
+    if (recordId) {
+      console.log(`[INFO] 记录ID: ${recordId}`);
+    }
+    console.log(`[OK] 结果链接: ${reportUrl}`);
+  } else {
+    console.log('[WARN] 回调响应未携带结果链接（旧版后端或仓库定位失败），report_url 缺省输出，不影响流水线结果');
   }
 
   console.log('\n================================================================');

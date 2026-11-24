@@ -47,3 +47,27 @@ test('OBS 读地址与选中桶名一致', () => {
     `https://${ObsUploader.OBS_BUCKET}.obs.cn-southwest-2.myhuaweicloud.com`
   );
 });
+
+test('pickAcceptance 提取受理响应 data 携带的 recordId/reportUrl', () => {
+  const acceptance = ObsUploader.pickAcceptance({
+    code: 200,
+    data: { recordId: '42', reportUrl: 'https://web/apps/repos?recordId=42' },
+  });
+  assert.strictEqual(acceptance.recordId, '42');
+  assert.strictEqual(acceptance.reportUrl, 'https://web/apps/repos?recordId=42');
+});
+
+test('pickAcceptance 响应缺 data 字段返回空对象（旧版后端兼容）', () => {
+  const acceptance = ObsUploader.pickAcceptance({ code: 200 });
+  assert.deepStrictEqual(acceptance, {});
+  assert.strictEqual(acceptance.recordId, undefined);
+  assert.strictEqual(acceptance.reportUrl, undefined);
+});
+
+test('pickAcceptance 回调失败无响应对象返回空对象（catch 通道同口径）', () => {
+  // uploadAndNotify 的 catch 分支 callbackResult 保持 null，取值同样收口到 pickAcceptance
+  const acceptance = ObsUploader.pickAcceptance(null);
+  assert.deepStrictEqual(acceptance, {});
+  assert.strictEqual(acceptance.recordId, undefined);
+  assert.strictEqual(acceptance.reportUrl, undefined);
+});
